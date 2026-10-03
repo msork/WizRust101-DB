@@ -105,8 +105,8 @@ fn resolves_poi_and_wizard_candidates_reports_conflicts_and_omits_unknowns() {
     assert!(result.status.success());
     let json: serde_json::Value = serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
     assert_eq!(json[pit], "Pit of the Noxii");
-    assert_eq!(json[hall], "Stonegaze’s Antichamber");
-    assert_eq!(json[conflicted], "Arcanum");
+    assert!(json.get(hall).is_none());
+    assert!(json.get(conflicted).is_none());
     assert!(json.get(unresolved).is_none());
     let stderr = String::from_utf8(result.stderr).unwrap();
     let stdout = String::from_utf8(result.stdout).unwrap();
@@ -116,6 +116,7 @@ fn resolves_poi_and_wizard_candidates_reports_conflicts_and_omits_unknowns() {
     assert!(stderr.contains("reference conflict"));
     assert!(stderr
         .contains("conflicts=[WizardZone=\"Infirmary\" conflicts with SharedMap=\"Arcanum\"]"));
-    assert!(stdout.contains("mismatches: 2"));
+    assert!(stderr.contains("unsupported WizardZone-only candidate"));
+    assert!(stdout.contains("mismatches: 1"));
     let _ = fs::remove_dir_all(temp);
 }

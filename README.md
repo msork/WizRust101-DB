@@ -6,10 +6,10 @@ A Rust CLI that builds `out/zones.json` from extracted Wizard101 data in `raw/`.
 
 ```sh
 cargo run -- generate --input raw --output out/zones.json
-cargo run -- compare --input raw --reference ~/Downloads/zones.json
+cargo run -- compare --input raw --reference tmp/zones.json
 ```
 
-The generator reports independent `WizardZone`, shared map-title, and verified Compass POI candidates. A proven POI-to-child portal chain wins; otherwise a unique per-zone `WizardZone` title is used only when no shared map title resolves. Candidate disagreements and reference conflicts are reported, and the reference file never supplies names.
+The generator reports independent `WizardZone`, shared map-title, and verified Compass POI candidates. A proven POI-to-child portal chain wins. Other candidates are selected only when raw associations establish a specific current or inherited location; WizardZone-only candidates and disagreements remain unresolved. Candidate disagreements and reference conflicts are reported, and `tmp/zones.json` is validation-only and never supplies names.
 
 Validation commands:
 

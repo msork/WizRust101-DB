@@ -92,6 +92,11 @@ pub fn discover(root: &Path) -> Result<Vec<Zone>, Box<dyn std::error::Error>> {
     let mut zones = Vec::with_capacity(raw_zones.len());
     for (path, raw) in raw_zones {
         let map_candidates = map_names.get(&path).cloned().unwrap_or_default();
+        let usable_map_candidates: BTreeSet<String> = map_candidates
+            .iter()
+            .filter(|name| valid_map_title(name))
+            .cloned()
+            .collect();
         let wizard_candidates = wizard_zone_key(&raw.data)
             .and_then(|key| wizard_zone_lang.get(&key).cloned())
             .into_iter()
@@ -112,8 +117,22 @@ pub fn discover(root: &Path) -> Result<Vec<Zone>, Box<dyn std::error::Error>> {
         }));
         candidates.sort_by(|a, b| (a.source, &a.name).cmp(&(b.source, &b.name)));
 
-        let (selected, ambiguity, conflicts, unresolved) =
-            select_candidate(&poi_candidates, &wizard_candidates, &map_candidates);
+        let (selected, mut ambiguity, conflicts, unresolved) =
+            select_candidate(&poi_candidates, &wizard_candidates, &usable_map_candidates);
+        let rejected: Vec<_> = map_candidates
+            .difference(&usable_map_candidates)
+            .cloned()
+            .collect();
+        if !rejected.is_empty() {
+            let reason = format!(
+                "rejected malformed shared-map names: {}",
+                rejected.join(" | ")
+            );
+            ambiguity = Some(match ambiguity {
+                Some(existing) => format!("{existing}; {reason}"),
+                None => reason,
+            });
+        }
         let _ = raw.directory;
         zones.push(Zone {
             path,
@@ -141,7 +160,7 @@ fn select_candidate(
                 join(poi)
             )),
             conflicts,
-            false,
+            true,
         );
     }
     if let Some(name) = poi.iter().next() {
@@ -160,33 +179,16 @@ fn select_candidate(
             None,
             Some(format!("conflicting shared-map names: {}", join(map))),
             conflicts,
-            false,
+            true,
         );
     }
     if let Some(name) = map.iter().next() {
-        if wizard.len() == 1 && wizard.first() != Some(name) {
+        if wizard.len() > 1 || (wizard.len() == 1 && wizard.first() != Some(name)) {
             return (
-                Some(Candidate {
-                    source: Source::SharedMap,
-                    name: name.clone(),
-                }),
                 None,
+                Some(format!("conflicting WizardZone/shared-map candidates: WizardZone={} SharedMap={name:?}", join(wizard))),
                 conflicts,
-                false,
-            );
-        }
-        if wizard.len() > 1 {
-            return (
-                Some(Candidate {
-                    source: Source::SharedMap,
-                    name: name.clone(),
-                }),
-                Some(format!(
-                    "multiple WizardZone candidates; retained shared map: {}",
-                    join(wizard)
-                )),
-                conflicts,
-                false,
+                true,
             );
         }
         return (
@@ -199,26 +201,32 @@ fn select_candidate(
             false,
         );
     }
-    if wizard.len() == 1 {
-        return (
-            Some(Candidate {
-                source: Source::WizardZone,
-                name: wizard.first().unwrap().clone(),
-            }),
-            None,
-            conflicts,
-            false,
-        );
-    }
     if wizard.len() > 1 {
         return (
             None,
             Some(format!("ambiguous WizardZone candidates: {}", join(wizard))),
             conflicts,
-            false,
+            true,
         );
     }
-    (None, None, conflicts, true)
+    let ambiguity = if wizard.len() == 1 {
+        Some(format!(
+            "unsupported WizardZone-only candidate: {:?}",
+            wizard.first().unwrap()
+        ))
+    } else {
+        None
+    };
+    (None, ambiguity, conflicts, true)
+}
+
+fn valid_map_title(name: &str) -> bool {
+    let trimmed = name.trim();
+    !trimmed.is_empty()
+        && trimmed == name
+        && !name.contains('|')
+        && !name.chars().any(char::is_control)
+        && !name.contains("  ")
 }
 
 fn candidate_conflicts(
@@ -594,27 +602,71 @@ mod tests {
     }
 
     #[test]
-    fn wizard_zone_is_used_when_map_title_is_absent() {
+    fn wizard_zone_only_candidate_is_unsupported() {
         let wizard = ["Stonegaze's Antichamber".to_owned()].into_iter().collect();
         let (selected, ambiguity, _, unresolved) =
             select_candidate(&BTreeSet::new(), &wizard, &BTreeSet::new());
-        assert_eq!(selected.unwrap().source, Source::WizardZone);
-        assert_eq!(ambiguity, None);
-        assert!(!unresolved);
+        assert!(selected.is_none());
+        assert!(ambiguity.unwrap().contains("unsupported WizardZone-only"));
+        assert!(unresolved);
     }
 
     #[test]
-    fn conflicting_wizard_zone_does_not_override_map() {
+    fn conflicting_wizard_zone_and_map_are_unresolved() {
         let wizard = ["Infirmary".to_owned()].into_iter().collect();
         let map = ["Arcanum".to_owned()].into_iter().collect();
         let (selected, ambiguity, conflicts, unresolved) =
             select_candidate(&BTreeSet::new(), &wizard, &map);
-        assert_eq!(selected.unwrap().name, "Arcanum");
-        assert_eq!(ambiguity, None);
+        assert!(selected.is_none());
+        assert!(ambiguity
+            .unwrap()
+            .contains("conflicting WizardZone/shared-map"));
         assert!(conflicts
             .iter()
             .any(|conflict| conflict.contains("WizardZone")));
-        assert!(!unresolved);
+        assert!(unresolved);
+    }
+
+    #[test]
+    fn named_regressions_stay_unresolved_without_specific_raw_relationship() {
+        let cases = [
+            ("Gorgon Cave", "Aquila", "Garden of Hesperides"),
+            ("Vestrilund", "Vestrilund", "Cenote"),
+            ("Zeus Exalted Duel", "Zeus Exalted Duel", "Mount Olympus"),
+        ];
+        for (expected_specific_name, wizard_name, map_name) in cases {
+            let wizard = [wizard_name.to_owned()].into_iter().collect();
+            let map = [map_name.to_owned()].into_iter().collect();
+            let (selected, ambiguity, _, unresolved) =
+                select_candidate(&BTreeSet::new(), &wizard, &map);
+            assert!(selected.is_none(), "{expected_specific_name}");
+            assert!(ambiguity.is_some(), "{expected_specific_name}");
+            assert!(unresolved, "{expected_specific_name}");
+        }
+    }
+
+    #[test]
+    fn malformed_altar_of_kings_map_label_is_rejected() {
+        assert!(!valid_map_title("Wizard City|Firecat Alley"));
+        let wizard = ["Altar of Kings".to_owned()].into_iter().collect();
+        let (selected, ambiguity, _, unresolved) =
+            select_candidate(&BTreeSet::new(), &wizard, &BTreeSet::new());
+        assert!(selected.is_none());
+        assert!(ambiguity.unwrap().contains("unsupported WizardZone-only"));
+        assert!(unresolved);
+    }
+
+    #[test]
+    fn triton_multiple_map_names_remain_ambiguous() {
+        let wizard = ["Galvanost Tower".to_owned()].into_iter().collect();
+        let map = ["Crab Alley".to_owned(), "Deep Warrens".to_owned()]
+            .into_iter()
+            .collect();
+        let (selected, ambiguity, _, unresolved) =
+            select_candidate(&BTreeSet::new(), &wizard, &map);
+        assert!(selected.is_none());
+        assert!(ambiguity.unwrap().contains("conflicting shared-map"));
+        assert!(unresolved);
     }
 
     #[test]
