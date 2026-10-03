@@ -9,7 +9,7 @@ cargo run -- generate --input raw --output out/zones.json
 cargo run -- compare --input raw --reference ~/Downloads/zones.json
 ```
 
-The generator follows explicit `DoodleMapMap.xml` links to map resources, then resolves each map's `Zone_########` key through the English `Zone.lang` table. It excludes zones whose names cannot be resolved from this chain. The reference file is validation data only: extracted names stay unchanged when the reference differs.
+The generator reports independent `WizardZone`, shared map-title, and verified Compass POI candidates. A proven POI-to-child portal chain wins; otherwise a unique per-zone `WizardZone` title is used only when no shared map title resolves. Candidate disagreements and reference conflicts are reported, and the reference file never supplies names.
 
 Validation commands:
 

@@ -4,16 +4,42 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Status {
-    Resolved(String),
-    Unresolved(String),
-    Ambiguous(Vec<String>),
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Source {
+    CompassPoi,
+    WizardZone,
+    SharedMap,
 }
+
+impl Source {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::CompassPoi => "CompassPoi",
+            Self::WizardZone => "WizardZone",
+            Self::SharedMap => "SharedMap",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub source: Source,
+    pub name: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Zone {
     pub path: String,
-    pub status: Status,
+    pub candidates: Vec<Candidate>,
+    pub selected: Option<Candidate>,
+    pub ambiguity: Option<String>,
+    pub conflicts: Vec<String>,
+    pub unresolved: bool,
+}
+
+struct RawZone {
+    directory: PathBuf,
+    data: Vec<u8>,
 }
 
 pub fn discover(root: &Path) -> Result<Vec<Zone>, Box<dyn std::error::Error>> {
@@ -23,101 +49,327 @@ pub fn discover(root: &Path) -> Result<Vec<Zone>, Box<dyn std::error::Error>> {
     let mut dirs = Vec::new();
     collect(root, &mut dirs)?;
     dirs.sort();
-    let mut paths = BTreeSet::new();
+
+    let mut raw_zones: BTreeMap<String, RawZone> = BTreeMap::new();
     for dir in dirs {
         let file = dir.join("gamedata.bin");
-        if file.is_file() {
-            if let Some(path) = embedded_path(&fs::read(file)?) {
-                paths.insert(path);
+        if !file.is_file() {
+            continue;
+        }
+        let data = fs::read(&file)?;
+        if let Some(path) = embedded_path(&data) {
+            if let Some(previous) = raw_zones.get(&path) {
+                if previous.data != data {
+                    return Err(format!(
+                        "duplicate canonical zone path has conflicting data: {path}"
+                    )
+                    .into());
+                }
+            } else {
+                raw_zones.insert(
+                    path,
+                    RawZone {
+                        directory: dir,
+                        data,
+                    },
+                );
             }
         }
     }
-    let loc = parse_zone_lang(&fs::read(root.join("misc/Root/Locale/en-US/Zone.lang"))?)?;
-    let refs = parse_map_associations(&fs::read(root.join("misc/Root/DoodleMapMap.xml"))?, &paths);
+    let paths: BTreeSet<String> = raw_zones.keys().cloned().collect();
+    let zone_lang = parse_lang(&fs::read(root.join("misc/Root/Locale/en-US/Zone.lang"))?)?;
+    let wizard_zone_lang = parse_lang(&fs::read(
+        root.join("misc/Root/Locale/en-US/WizardZone.lang"),
+    )?)?;
+    let compass_lang = parse_lang(&fs::read(
+        root.join("misc/Root/Locale/en-US/WizardCompassLocs.lang"),
+    )?)?;
+    let map_refs =
+        parse_map_associations(&fs::read(root.join("misc/Root/DoodleMapMap.xml"))?, &paths);
+    let map_names = resolve_map_names(root, &map_refs, &zone_lang)?;
+    let compass_names = resolve_compass_children(&raw_zones, &map_refs, &compass_lang);
+
+    let mut zones = Vec::with_capacity(raw_zones.len());
+    for (path, raw) in raw_zones {
+        let map_candidates = map_names.get(&path).cloned().unwrap_or_default();
+        let wizard_candidates = wizard_zone_key(&raw.data)
+            .and_then(|key| wizard_zone_lang.get(&key).cloned())
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let poi_candidates = compass_names.get(&path).cloned().unwrap_or_default();
+        let mut candidates = Vec::new();
+        candidates.extend(poi_candidates.iter().cloned().map(|name| Candidate {
+            source: Source::CompassPoi,
+            name,
+        }));
+        candidates.extend(wizard_candidates.iter().cloned().map(|name| Candidate {
+            source: Source::WizardZone,
+            name,
+        }));
+        candidates.extend(map_candidates.iter().cloned().map(|name| Candidate {
+            source: Source::SharedMap,
+            name,
+        }));
+        candidates.sort_by(|a, b| (a.source, &a.name).cmp(&(b.source, &b.name)));
+
+        let (selected, ambiguity, conflicts, unresolved) =
+            select_candidate(&poi_candidates, &wizard_candidates, &map_candidates);
+        let _ = raw.directory;
+        zones.push(Zone {
+            path,
+            candidates,
+            selected,
+            ambiguity,
+            conflicts,
+            unresolved,
+        });
+    }
+    Ok(zones)
+}
+
+fn select_candidate(
+    poi: &BTreeSet<String>,
+    wizard: &BTreeSet<String>,
+    map: &BTreeSet<String>,
+) -> (Option<Candidate>, Option<String>, Vec<String>, bool) {
+    let conflicts = candidate_conflicts(poi, wizard, map);
+    if poi.len() > 1 {
+        return (
+            None,
+            Some(format!(
+                "conflicting proven Compass POI names: {}",
+                join(poi)
+            )),
+            conflicts,
+            false,
+        );
+    }
+    if let Some(name) = poi.iter().next() {
+        return (
+            Some(Candidate {
+                source: Source::CompassPoi,
+                name: name.clone(),
+            }),
+            None,
+            conflicts,
+            false,
+        );
+    }
+    if map.len() > 1 {
+        return (
+            None,
+            Some(format!("conflicting shared-map names: {}", join(map))),
+            conflicts,
+            false,
+        );
+    }
+    if let Some(name) = map.iter().next() {
+        if wizard.len() == 1 && wizard.first() != Some(name) {
+            return (
+                Some(Candidate {
+                    source: Source::SharedMap,
+                    name: name.clone(),
+                }),
+                None,
+                conflicts,
+                false,
+            );
+        }
+        if wizard.len() > 1 {
+            return (
+                Some(Candidate {
+                    source: Source::SharedMap,
+                    name: name.clone(),
+                }),
+                Some(format!(
+                    "multiple WizardZone candidates; retained shared map: {}",
+                    join(wizard)
+                )),
+                conflicts,
+                false,
+            );
+        }
+        return (
+            Some(Candidate {
+                source: Source::SharedMap,
+                name: name.clone(),
+            }),
+            None,
+            conflicts,
+            false,
+        );
+    }
+    if wizard.len() == 1 {
+        return (
+            Some(Candidate {
+                source: Source::WizardZone,
+                name: wizard.first().unwrap().clone(),
+            }),
+            None,
+            conflicts,
+            false,
+        );
+    }
+    if wizard.len() > 1 {
+        return (
+            None,
+            Some(format!("ambiguous WizardZone candidates: {}", join(wizard))),
+            conflicts,
+            false,
+        );
+    }
+    (None, None, conflicts, true)
+}
+
+fn candidate_conflicts(
+    poi: &BTreeSet<String>,
+    wizard: &BTreeSet<String>,
+    map: &BTreeSet<String>,
+) -> Vec<String> {
+    let candidates = [
+        (Source::CompassPoi, poi),
+        (Source::WizardZone, wizard),
+        (Source::SharedMap, map),
+    ];
+    let mut conflicts = BTreeSet::new();
+    for (i, (source, names)) in candidates.iter().enumerate() {
+        for (other_source, other_names) in candidates.iter().skip(i + 1) {
+            for name in names.iter() {
+                for other in other_names.iter() {
+                    if name != other {
+                        conflicts.insert(format!(
+                            "{}={name:?} conflicts with {}={other:?}",
+                            source.label(),
+                            other_source.label()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    conflicts.into_iter().collect()
+}
+
+fn join(names: &BTreeSet<String>) -> String {
+    names.iter().cloned().collect::<Vec<_>>().join(" | ")
+}
+
+fn collect(dir: &Path, dirs: &mut Vec<PathBuf>) -> io::Result<()> {
+    dirs.push(dir.to_path_buf());
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            collect(&entry.path(), dirs)?;
+        }
+    }
+    Ok(())
+}
+
+fn embedded_path(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-')))
+        .find(|value| {
+            value.contains('/')
+                && value.split('/').all(|part| !part.is_empty())
+                && value
+                    .split('/')
+                    .next()
+                    .is_some_and(|part| part.chars().next().is_some_and(char::is_uppercase))
+        })
+        .map(str::to_owned)
+}
+
+fn parse_lang(bytes: &[u8]) -> Result<BTreeMap<String, String>, Box<dyn std::error::Error>> {
+    if !bytes.len().is_multiple_of(2) {
+        return Err("localization table has odd byte length".into());
+    }
+    let (pairs, _) = bytes.as_chunks::<2>();
+    let units: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
+    let text = String::from_utf16(units.strip_prefix(&[0xfeff]).unwrap_or(&units))?;
+    let lines: Vec<&str> = text.lines().collect();
+    let mut values = BTreeMap::new();
+    for (i, line) in lines.iter().enumerate() {
+        let key = line.trim();
+        if key.len() != 8 || !key.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        if let Some(value) = lines[i + 1..].iter().find(|value| !value.trim().is_empty()) {
+            values.insert(key.to_owned(), (*value).to_owned());
+        }
+    }
+    Ok(values)
+}
+
+fn wizard_zone_key(bytes: &[u8]) -> Option<String> {
+    let path = embedded_path(bytes)?;
+    let path_end = find_from(bytes, path.as_bytes(), 0)? + path.len();
+    first_resource_key(&bytes[path_end..], b"WizardZone_")
+}
+
+fn resource_keys(bytes: &[u8], prefix: &[u8]) -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+    let mut start = 0;
+    while let Some(index) = find_from(bytes, prefix, start) {
+        let digits_start = index + prefix.len();
+        if bytes
+            .get(digits_start..digits_start + 8)
+            .is_some_and(|digits| digits.iter().all(u8::is_ascii_digit))
+        {
+            keys.insert(String::from_utf8_lossy(&bytes[digits_start..digits_start + 8]).into());
+        }
+        start = digits_start;
+    }
+    keys
+}
+
+fn first_zone_key(bytes: &[u8]) -> Option<String> {
+    first_resource_key(bytes, b"Zone_")
+}
+
+fn first_resource_key(bytes: &[u8], prefix: &[u8]) -> Option<String> {
+    let mut cursor = 0;
+    while let Some(index) = find_from(bytes, prefix, cursor) {
+        let start = index + prefix.len();
+        if bytes
+            .get(start..start + 8)
+            .is_some_and(|digits| digits.iter().all(u8::is_ascii_digit))
+        {
+            return Some(String::from_utf8_lossy(&bytes[start..start + 8]).into_owned());
+        }
+        cursor = start;
+    }
+    None
+}
+
+fn resolve_map_names(
+    root: &Path,
+    refs: &BTreeMap<String, BTreeSet<String>>,
+    loc: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, BTreeSet<String>>, Box<dyn std::error::Error>> {
     let mut map_cache = BTreeMap::new();
     for map in refs.values().flatten() {
         if map_cache.contains_key(map) {
             continue;
         }
-        let p = root.join("misc/GUI-WorldData/Maps").join(map);
-        let title = if p.is_file() {
-            first_zone_key(&fs::read(p)?)
+        let path = root.join("misc/GUI-WorldData/Maps").join(map);
+        let title = if path.is_file() {
+            first_zone_key(&fs::read(path)?)
         } else {
             None
         };
-        map_cache.insert(map.clone(), title.and_then(|k| loc.get(&k).cloned()));
+        map_cache.insert(map.clone(), title.and_then(|key| loc.get(&key).cloned()));
     }
-    let zones = paths
-        .into_iter()
-        .map(|path| {
-            let names: BTreeSet<String> = refs
-                .get(&path)
-                .into_iter()
-                .flatten()
-                .filter_map(|m| map_cache.get(m).and_then(Clone::clone))
-                .collect();
-            let status = match names.len() {
-                1 => Status::Resolved(names.into_iter().next().unwrap()),
-                0 => Status::Unresolved("no explicit map title resolved".into()),
-                _ => Status::Ambiguous(names.into_iter().collect()),
-            };
-            Zone { path, status }
-        })
-        .collect();
-    Ok(zones)
+    let mut names = BTreeMap::new();
+    for (zone, maps) in refs {
+        let values = maps
+            .iter()
+            .filter_map(|map| map_cache.get(map).and_then(Clone::clone))
+            .collect();
+        names.insert(zone.clone(), values);
+    }
+    Ok(names)
 }
 
-fn collect(dir: &Path, dirs: &mut Vec<PathBuf>) -> io::Result<()> {
-    dirs.push(dir.to_path_buf());
-    for e in fs::read_dir(dir)? {
-        let e = e?;
-        if e.file_type()?.is_dir() {
-            collect(&e.path(), dirs)?;
-        }
-    }
-    Ok(())
-}
-fn embedded_path(bytes: &[u8]) -> Option<String> {
-    let s = String::from_utf8_lossy(bytes);
-    s.split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-')))
-        .find(|x| {
-            x.contains('/')
-                && x.split('/').all(|p| !p.is_empty())
-                && x.split('/')
-                    .next()
-                    .is_some_and(|p| p.chars().next().is_some_and(char::is_uppercase))
-        })
-        .map(str::to_owned)
-}
-fn parse_zone_lang(bytes: &[u8]) -> Result<BTreeMap<String, String>, Box<dyn std::error::Error>> {
-    if !bytes.len().is_multiple_of(2) {
-        return Err("Zone.lang has odd byte length".into());
-    }
-    let (pairs, _) = bytes.as_chunks::<2>();
-    let units: Vec<u16> = pairs.iter().map(|b| u16::from_le_bytes(*b)).collect();
-    let text = String::from_utf16(units.strip_prefix(&[0xfeff]).unwrap_or(&units))?;
-    let lines: Vec<&str> = text.lines().collect();
-    let mut out = BTreeMap::new();
-    for i in 0..lines.len().saturating_sub(1) {
-        let id = lines[i].trim();
-        if id.len() == 8 && id.bytes().all(|b| b.is_ascii_digit()) {
-            if let Some(value) = lines[i + 1..].iter().map(|line| line.trim()).find(|line| {
-                !line.is_empty() && !(line.len() == 8 && line.bytes().all(|b| b.is_ascii_digit()))
-            }) {
-                out.insert(id.to_owned(), value.to_owned());
-            }
-        }
-    }
-    Ok(out)
-}
-fn first_zone_key(bytes: &[u8]) -> Option<String> {
-    let s = String::from_utf8_lossy(bytes);
-    let b = s.as_bytes();
-    b.windows(13).find_map(|w| {
-        (w.starts_with(b"Zone_") && w[5..].iter().all(u8::is_ascii_digit))
-            .then(|| String::from_utf8_lossy(&w[5..]).into_owned())
-    })
-}
 fn parse_map_associations(
     blob: &[u8],
     paths: &BTreeSet<String>,
@@ -125,57 +377,198 @@ fn parse_map_associations(
     let marker = b"|GUI|WorldData|Maps/";
     let mut maprefs = Vec::new();
     let mut pos = 0;
-    while let Some(i) = find_from(blob, marker, pos) {
-        let start = i + marker.len();
-        if let Some(endrel) = blob[start..].windows(4).position(|w| w == b".xml") {
-            let end = start + endrel + 4;
-            let map = String::from_utf8_lossy(&blob[start..end]).into_owned();
-            maprefs.push((end, map));
+    while let Some(index) = find_from(blob, marker, pos) {
+        let start = index + marker.len();
+        if let Some(end_relative) = blob[start..]
+            .windows(4)
+            .position(|window| window == b".xml")
+        {
+            let end = start + end_relative + 4;
+            maprefs.push((end, String::from_utf8_lossy(&blob[start..end]).into_owned()));
             pos = end;
         } else {
             pos = start;
         }
     }
-    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut associations: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for path in paths {
-        let needle = path.as_bytes();
         let mut scan = 0;
-        while let Some(i) = find_from(blob, needle, scan) {
-            let ix = maprefs.partition_point(|(end, _)| *end <= i);
-            if ix > 0 {
-                let (end, map) = &maprefs[ix - 1];
-                if i - *end <= 64 {
-                    out.entry(path.clone()).or_default().insert(map.clone());
+        while let Some(index) = find_from(blob, path.as_bytes(), scan) {
+            let preceding = maprefs.partition_point(|(end, _)| *end <= index);
+            if preceding > 0 {
+                let (end, map) = &maprefs[preceding - 1];
+                if index - *end <= 64 {
+                    associations
+                        .entry(path.clone())
+                        .or_default()
+                        .insert(map.clone());
                 }
             }
-            scan = i + needle.len();
+            scan = index + path.len();
         }
     }
-    out
+    associations
 }
+
+fn resolve_compass_children(
+    zones: &BTreeMap<String, RawZone>,
+    map_refs: &BTreeMap<String, BTreeSet<String>>,
+    compass_lang: &BTreeMap<String, String>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut candidates: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut children_by_exit: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (child_path, child) in zones {
+        let triggers = fs::read(child.directory.join("triggers.xml")).unwrap_or_default();
+        let volumes = fs::read(child.directory.join("volumes.xml")).unwrap_or_default();
+        for token in exit_tokens(&triggers)
+            .into_iter()
+            .chain(exit_tokens(&volumes))
+        {
+            children_by_exit
+                .entry(token)
+                .or_default()
+                .push(child_path.clone());
+        }
+    }
+    for (parent_path, parent) in zones {
+        let triggers_path = parent.directory.join("triggers.xml");
+        let volumes_path = parent.directory.join("volumes.xml");
+        let (Ok(triggers), Ok(volumes)) = (fs::read(triggers_path), fs::read(volumes_path)) else {
+            continue;
+        };
+        let parent_maps = map_refs.get(parent_path).cloned().unwrap_or_default();
+        if parent_maps.is_empty() {
+            continue;
+        }
+        for (poi_token, loc_key) in poi_trigger_links(&triggers, &volumes) {
+            let parent_target = format!("Teleport-{poi_token}");
+            if !contains_exact_token(&volumes, parent_target.as_bytes())
+                && !contains_exact_token(&triggers, parent_target.as_bytes())
+            {
+                continue;
+            }
+            let Some(display_name) = compass_lang.get(&loc_key) else {
+                continue;
+            };
+            for child_path in children_by_exit.get(&poi_token).into_iter().flatten() {
+                if child_path == parent_path
+                    || !map_refs
+                        .get(child_path)
+                        .is_some_and(|maps| !maps.is_disjoint(&parent_maps))
+                {
+                    continue;
+                }
+                candidates
+                    .entry(child_path.clone())
+                    .or_default()
+                    .insert(display_name.clone());
+            }
+        }
+    }
+    candidates
+}
+
+fn poi_trigger_links(triggers: &[u8], volumes: &[u8]) -> BTreeSet<(String, String)> {
+    let trigger_marker = b"Trigger-POI-";
+    let next_trigger = b"Trigger-";
+    let mut links = BTreeSet::new();
+    let mut cursor = 0;
+    while let Some(start) = find_from(triggers, trigger_marker, cursor) {
+        let token_start = start + trigger_marker.len();
+        let Some(token) = read_token(triggers, token_start) else {
+            cursor = token_start;
+            continue;
+        };
+        let record_start = token_start + token.len();
+        let record_end = find_from(triggers, next_trigger, record_start).unwrap_or(triggers.len());
+        let record = &triggers[record_start..record_end];
+        let expected_volume = format!("Enter_POI Volume-{}", String::from_utf8_lossy(token));
+        if !contains_exact_token(record, expected_volume.as_bytes()) {
+            cursor = record_end;
+            continue;
+        }
+        let volume_name = format!("Volume-{}", String::from_utf8_lossy(token));
+        if !contains_exact_token(volumes, volume_name.as_bytes()) {
+            cursor = record_end;
+            continue;
+        }
+        let keys = resource_keys(record, b"WizardCompassLocs_");
+        if keys.len() == 1 {
+            links.insert((
+                String::from_utf8_lossy(token).into_owned(),
+                keys.into_iter().next().unwrap(),
+            ));
+        }
+        cursor = record_end;
+    }
+    links
+}
+
+fn read_token(bytes: &[u8], start: usize) -> Option<&[u8]> {
+    let mut end = bytes[start..]
+        .iter()
+        .position(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_' && *byte != b'-')?
+        + start;
+    if end > start && bytes[end - 1] == b'H' && bytes.get(end) == Some(&0) {
+        end -= 1;
+    }
+    (end > start).then_some(&bytes[start..end])
+}
+
+fn exit_tokens(bytes: &[u8]) -> BTreeSet<String> {
+    let prefix = b"Teleport-Exit";
+    let mut tokens = BTreeSet::new();
+    let mut cursor = 0;
+    while let Some(start) = find_from(bytes, prefix, cursor) {
+        let token_start = start + prefix.len();
+        if let Some(token) = read_token(bytes, token_start) {
+            tokens.insert(String::from_utf8_lossy(token).into_owned());
+            cursor = token_start + token.len();
+        } else {
+            cursor = token_start;
+        }
+    }
+    tokens
+}
+
+fn contains_exact_token(haystack: &[u8], token: &[u8]) -> bool {
+    let mut cursor = 0;
+    while let Some(start) = find_from(haystack, token, cursor) {
+        let end = start + token.len();
+        let boundary = haystack
+            .get(end)
+            .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_' && *byte != b'-')
+            || (haystack.get(end) == Some(&b'H') && haystack.get(end + 1) == Some(&0));
+        if boundary {
+            return true;
+        }
+        cursor = end;
+    }
+    false
+}
+
 fn find_from(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     if needle.is_empty() || from > haystack.len() {
         return None;
     }
     haystack[from..]
         .windows(needle.len())
-        .position(|w| w == needle)
-        .map(|i| i + from)
+        .position(|window| window == needle)
+        .map(|index| index + from)
 }
+
 pub fn write_json(zones: &[Zone], output: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let parent = output
         .parent()
-        .filter(|p| !p.as_os_str().is_empty())
+        .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     fs::create_dir_all(parent)?;
     let data: BTreeMap<&str, &str> = zones
         .iter()
-        .filter_map(|z| {
-            if let Status::Resolved(n) = &z.status {
-                Some((z.path.as_str(), n.as_str()))
-            } else {
-                None
-            }
+        .filter_map(|zone| {
+            zone.selected
+                .as_ref()
+                .map(|candidate| (zone.path.as_str(), candidate.name.as_str()))
         })
         .collect();
     let mut bytes = serde_json::to_vec_pretty(&data)?;
@@ -187,27 +580,69 @@ pub fn write_json(zones: &[Zone], output: &Path) -> Result<(), Box<dyn std::erro
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn parses_localization_and_first_map_title() {
-        let mut b = vec![0xff, 0xfe];
-        for c in "1:Zone\n00001123\n\nGarden of Hesperides\n".encode_utf16() {
-            b.extend(c.to_le_bytes())
-        }
-        let d = parse_zone_lang(&b).unwrap();
-        assert_eq!(d["00001123"], "Garden of Hesperides");
+    fn selects_proven_poi_before_other_candidates() {
+        let poi = ["Pit of the Noxii".to_owned()].into_iter().collect();
+        let wizard = ["Mount Olympus".to_owned()].into_iter().collect();
+        let map = ["Mount Olympus".to_owned()].into_iter().collect();
+        let (selected, ambiguity, conflicts, unresolved) = select_candidate(&poi, &wizard, &map);
+        assert_eq!(selected.unwrap().name, "Pit of the Noxii");
+        assert_eq!(ambiguity, None);
+        assert_eq!(conflicts.len(), 2);
+        assert!(!unresolved);
+    }
+
+    #[test]
+    fn wizard_zone_is_used_when_map_title_is_absent() {
+        let wizard = ["Stonegaze's Antichamber".to_owned()].into_iter().collect();
+        let (selected, ambiguity, _, unresolved) =
+            select_candidate(&BTreeSet::new(), &wizard, &BTreeSet::new());
+        assert_eq!(selected.unwrap().source, Source::WizardZone);
+        assert_eq!(ambiguity, None);
+        assert!(!unresolved);
+    }
+
+    #[test]
+    fn conflicting_wizard_zone_does_not_override_map() {
+        let wizard = ["Infirmary".to_owned()].into_iter().collect();
+        let map = ["Arcanum".to_owned()].into_iter().collect();
+        let (selected, ambiguity, conflicts, unresolved) =
+            select_candidate(&BTreeSet::new(), &wizard, &map);
+        assert_eq!(selected.unwrap().name, "Arcanum");
+        assert_eq!(ambiguity, None);
+        assert!(conflicts
+            .iter()
+            .any(|conflict| conflict.contains("WizardZone")));
+        assert!(!unresolved);
+    }
+
+    #[test]
+    fn poi_requires_trigger_volume_key_and_exact_token() {
+        let trigger = b"Trigger-POI-PitOfTheNoxii\0Enter_POI Volume-PitOfTheNoxii\0WizardCompassLocs_00000135\0Trigger-Other";
+        let volumes = b"Volume-PitOfTheNoxii\0TeleportVol_Teleport-PitOfTheNoxii";
         assert_eq!(
-            first_zone_key(b"<Map>Zone_00001123</Map>Zone_00001124"),
+            poi_trigger_links(trigger, volumes),
+            [("PitOfTheNoxii".into(), "00000135".into())]
+                .into_iter()
+                .collect()
+        );
+        assert!(poi_trigger_links(trigger, b"Volume-PitOfTheNoxiiOther").is_empty());
+    }
+
+    #[test]
+    fn map_title_key_is_extracted_from_binary_strings() {
+        assert_eq!(
+            first_zone_key(b"Zone_00001123\0Zone_00001124"),
             Some("00001123".into())
         );
     }
+
     #[test]
-    fn only_explicit_associations_are_used() {
-        let p = "Aquila/Interiors/AQ_Z01_Apollo_Room".to_string();
-        let set = [p.clone()].into_iter().collect();
-        let b = b"|GUI|WorldData|Maps/AQ_Z01_Palace.xml\0Aquila/Interiors/AQ_Z01_Apollo_Room";
-        let a = parse_map_associations(b, &set);
-        assert!(a[&p].contains("AQ_Z01_Palace.xml"));
-        let none = parse_map_associations(b"Aquila/Interiors/AQ_Z01_Apollo_Room", &set);
-        assert!(!none.contains_key(&p));
+    fn wizard_zone_uses_primary_header_reference_only() {
+        assert_eq!(
+            wizard_zone_key(b"WizardZone_00000001\0Aquila/Interiors/Test\0WizardZone_00001603\0later WizardZone_00001604"),
+            Some("00001603".into())
+        );
     }
 }
