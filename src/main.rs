@@ -96,11 +96,15 @@ fn report_source_summary(zones: &[Zone]) {
         conflicts += usize::from(!zone.conflicts.is_empty());
     }
     eprintln!(
-        "candidate zones: CompassPoi={}, WizardZone={}, SharedMap={}; selected: CompassPoi={}, WizardZone={}, SharedMap={}; candidate ambiguities={ambiguous}; conflicting candidates={conflicts}",
+        "candidate zones: CompassPoi={}, ZoneHeader={}, HousingHeader={}, WizardZone={}, SharedMap={}; selected: CompassPoi={}, ZoneHeader={}, HousingHeader={}, WizardZone={}, SharedMap={}; candidate ambiguities={ambiguous}; conflicting candidates={conflicts}",
         candidates.get(&Source::CompassPoi).copied().unwrap_or_default(),
+        candidates.get(&Source::ZoneHeader).copied().unwrap_or_default(),
+        candidates.get(&Source::HousingHeader).copied().unwrap_or_default(),
         candidates.get(&Source::WizardZone).copied().unwrap_or_default(),
         candidates.get(&Source::SharedMap).copied().unwrap_or_default(),
         selected.get(&Source::CompassPoi).copied().unwrap_or_default(),
+        selected.get(&Source::ZoneHeader).copied().unwrap_or_default(),
+        selected.get(&Source::HousingHeader).copied().unwrap_or_default(),
         selected.get(&Source::WizardZone).copied().unwrap_or_default(),
         selected.get(&Source::SharedMap).copied().unwrap_or_default(),
     );
@@ -124,6 +128,12 @@ fn trace(zone: &Zone) -> String {
         format!("confidence={}", zone.confidence.label()),
         format!("provenance={:?}", zone.selection_provenance),
     ];
+    if let Some(header) = &zone.header_field_value {
+        details.push(format!("header_field_value={header:?}"));
+    }
+    if let Some(localized) = &zone.header_localized_value {
+        details.push(format!("header_localized_value={localized:?}"));
+    }
     if let Some(ambiguity) = &zone.ambiguity {
         details.push(format!("ambiguity={ambiguity:?}"));
     }

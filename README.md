@@ -9,7 +9,9 @@ cargo run -- generate --input raw --output out/zones.json
 cargo run -- compare --input raw --reference tmp/zones.json
 ```
 
-The generator reports independent `WizardZone`, shared map-title, and verified Compass POI candidates. A proven POI-to-child portal chain wins. Other candidates are selected only when raw associations establish a specific current or inherited location; WizardZone-only candidates and disagreements remain unresolved. Candidate disagreements and reference conflicts are reported, and `tmp/zones.json` is validation-only and never supplies names.
+`out/zones.json` is a simple canonical-path -> best-available-name object for RPC consumers. Verified names use proven raw relationships, including a complete Compass POI-to-child chain, direct localized zone/housing header fields, or an uncontested shared-map association. An `unverified_fallback` uses the localized WizardZone value from the exact zone-header field; it may name a broader area or phase. `Unknown` means no usable localized name was found.
+
+`out/zones.diagnostics.json` records candidates, selected source and confidence, raw header values, provenance, and conflicts. `tmp/zones.json` is validation-only: it reports exact matches, mismatches, unresolved paths, and new paths, and never supplies names.
 
 Validation commands:
 

@@ -7,6 +7,8 @@ use std::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Source {
     CompassPoi,
+    ZoneHeader,
+    HousingHeader,
     WizardZone,
     SharedMap,
 }
@@ -15,6 +17,8 @@ impl Source {
     pub fn label(self) -> &'static str {
         match self {
             Self::CompassPoi => "CompassPoi",
+            Self::ZoneHeader => "ZoneHeader",
+            Self::HousingHeader => "HousingHeader",
             Self::WizardZone => "WizardZone",
             Self::SharedMap => "SharedMap",
         }
@@ -33,6 +37,8 @@ pub struct Zone {
     pub candidates: Vec<Candidate>,
     pub selected: Option<Candidate>,
     pub confidence: Confidence,
+    pub header_field_value: Option<String>,
+    pub header_localized_value: Option<String>,
     pub header_wizard_zone: Option<String>,
     pub selection_provenance: String,
     pub ambiguity: Option<String>,
@@ -98,6 +104,7 @@ pub fn discover(root: &Path) -> Result<Vec<Zone>, Box<dyn std::error::Error>> {
     }
     let paths: BTreeSet<String> = raw_zones.keys().cloned().collect();
     let zone_lang = parse_lang(&fs::read(root.join("misc/Root/Locale/en-US/Zone.lang"))?)?;
+    let housing_lang = parse_lang(&fs::read(root.join("misc/Root/Locale/en-US/Housing.lang"))?)?;
     let wizard_zone_lang = parse_lang(&fs::read(
         root.join("misc/Root/Locale/en-US/WizardZone.lang"),
     )?)?;
@@ -117,20 +124,64 @@ pub fn discover(root: &Path) -> Result<Vec<Zone>, Box<dyn std::error::Error>> {
             .filter(|name| valid_map_title(name))
             .cloned()
             .collect();
-        let header_wizard_zone = wizard_zone_header_value(&raw.data, &path);
-        let wizard_candidates = header_wizard_zone
-            .as_deref()
-            .and_then(|value| value.strip_prefix("WizardZone_"))
-            .and_then(|key| wizard_zone_lang.get(key).cloned())
-            .filter(|name| valid_localized_name(name))
-            .into_iter()
-            .collect::<BTreeSet<_>>();
+        let header_field_value = zone_header_field_value(&raw.data, &path);
+        let header_localized_value = header_field_value.as_deref().and_then(|value| {
+            localization_for_header(value, &zone_lang, &housing_lang, &wizard_zone_lang).cloned()
+        });
+        let zone_header_candidates = candidate_from_header(
+            header_field_value.as_deref(),
+            &zone_lang,
+            &housing_lang,
+            &wizard_zone_lang,
+        )
+        .filter(|candidate| candidate.source == Source::ZoneHeader)
+        .into_iter()
+        .map(|candidate| candidate.name)
+        .collect::<BTreeSet<_>>();
+        let housing_header_candidates = candidate_from_header(
+            header_field_value.as_deref(),
+            &zone_lang,
+            &housing_lang,
+            &wizard_zone_lang,
+        )
+        .filter(|candidate| candidate.source == Source::HousingHeader)
+        .into_iter()
+        .map(|candidate| candidate.name)
+        .collect::<BTreeSet<_>>();
+        let wizard_candidates = candidate_from_header(
+            header_field_value.as_deref(),
+            &zone_lang,
+            &housing_lang,
+            &wizard_zone_lang,
+        )
+        .filter(|candidate| candidate.source == Source::WizardZone)
+        .into_iter()
+        .map(|candidate| candidate.name)
+        .collect::<BTreeSet<_>>();
         let poi_candidates = compass_names.get(&path).cloned().unwrap_or_default();
         let mut candidates = Vec::new();
         candidates.extend(poi_candidates.iter().cloned().map(|name| Candidate {
             source: Source::CompassPoi,
             name,
         }));
+        candidates.extend(
+            zone_header_candidates
+                .iter()
+                .cloned()
+                .map(|name| Candidate {
+                    source: Source::ZoneHeader,
+                    name,
+                }),
+        );
+        candidates.extend(
+            housing_header_candidates
+                .iter()
+                .cloned()
+                .map(|name| Candidate {
+                    source: Source::HousingHeader,
+                    name,
+                }),
+        );
         candidates.extend(wizard_candidates.iter().cloned().map(|name| Candidate {
             source: Source::WizardZone,
             name,
@@ -141,8 +192,13 @@ pub fn discover(root: &Path) -> Result<Vec<Zone>, Box<dyn std::error::Error>> {
         }));
         candidates.sort_by(|a, b| (a.source, &a.name).cmp(&(b.source, &b.name)));
 
-        let (selected, confidence, mut ambiguity, conflicts) =
-            select_candidate(&poi_candidates, &wizard_candidates, &usable_map_candidates);
+        let (selected, confidence, mut ambiguity, conflicts) = select_candidate(
+            &poi_candidates,
+            &zone_header_candidates,
+            &housing_header_candidates,
+            &wizard_candidates,
+            &usable_map_candidates,
+        );
         let rejected: Vec<_> = map_candidates
             .difference(&usable_map_candidates)
             .cloned()
@@ -164,22 +220,36 @@ pub fn discover(root: &Path) -> Result<Vec<Zone>, Box<dyn std::error::Error>> {
                     "verified parent POI/Compass localization and matching child transition chain"
                         .to_owned()
                 }
+                Source::ZoneHeader => format!(
+                    "exact zone-header {:?} -> Zone.lang",
+                    header_field_value.as_deref().unwrap_or_default()
+                ),
+                Source::HousingHeader => format!(
+                    "exact zone-header {:?} -> Housing.lang",
+                    header_field_value.as_deref().unwrap_or_default()
+                ),
                 Source::SharedMap => {
                     "verified DoodleMapMap association -> map resource Zone key -> Zone.lang"
                         .to_owned()
                 }
                 Source::WizardZone => format!(
                     "unverified zone-header WizardZone field {:?} -> WizardZone.lang; this channel can name a parent region or phase",
-                    header_wizard_zone.as_deref().unwrap_or_default()
+                    header_field_value.as_deref().unwrap_or_default()
                 ),
             },
         );
+        let header_wizard_zone = header_field_value
+            .as_deref()
+            .filter(|value| value.starts_with("WizardZone_"))
+            .map(str::to_owned);
         let unresolved = confidence == Confidence::Unknown;
         zones.push(Zone {
             path,
             candidates,
             selected,
             confidence,
+            header_field_value,
+            header_localized_value,
             header_wizard_zone,
             selection_provenance,
             ambiguity,
@@ -192,10 +262,12 @@ pub fn discover(root: &Path) -> Result<Vec<Zone>, Box<dyn std::error::Error>> {
 
 fn select_candidate(
     poi: &BTreeSet<String>,
+    zone_header: &BTreeSet<String>,
+    housing_header: &BTreeSet<String>,
     wizard: &BTreeSet<String>,
     map: &BTreeSet<String>,
 ) -> (Option<Candidate>, Confidence, Option<String>, Vec<String>) {
-    let conflicts = candidate_conflicts(poi, wizard, map);
+    let conflicts = candidate_conflicts(poi, zone_header, housing_header, wizard, map);
     if poi.len() == 1 {
         let name = poi.first().expect("one POI candidate");
         return (
@@ -209,7 +281,39 @@ fn select_candidate(
         );
     }
 
+    if zone_header.len() == 1 {
+        return (
+            Some(Candidate {
+                source: Source::ZoneHeader,
+                name: zone_header
+                    .first()
+                    .expect("one Zone header candidate")
+                    .clone(),
+            }),
+            Confidence::Verified,
+            None,
+            conflicts,
+        );
+    }
+
+    if housing_header.len() == 1 {
+        return (
+            Some(Candidate {
+                source: Source::HousingHeader,
+                name: housing_header
+                    .first()
+                    .expect("one Housing header candidate")
+                    .clone(),
+            }),
+            Confidence::Verified,
+            None,
+            conflicts,
+        );
+    }
+
     let candidate_conflict = !poi.is_empty()
+        || zone_header.len() > 1
+        || housing_header.len() > 1
         || map.len() > 1
         || (map.len() == 1 && wizard.len() == 1 && wizard.first() != map.first());
     if poi.is_empty() && map.len() == 1 && (wizard.is_empty() || wizard == map) {
@@ -274,13 +378,21 @@ fn valid_localized_name(name: &str) -> bool {
         && !name.contains('>')
 }
 
+fn valid_direct_header_name(name: &str) -> bool {
+    valid_localized_name(name) && !name.trim().to_ascii_uppercase().starts_with("TEST-")
+}
+
 fn candidate_conflicts(
     poi: &BTreeSet<String>,
+    zone_header: &BTreeSet<String>,
+    housing_header: &BTreeSet<String>,
     wizard: &BTreeSet<String>,
     map: &BTreeSet<String>,
 ) -> Vec<String> {
     let candidates = [
         (Source::CompassPoi, poi),
+        (Source::ZoneHeader, zone_header),
+        (Source::HousingHeader, housing_header),
         (Source::WizardZone, wizard),
         (Source::SharedMap, map),
     ];
@@ -343,26 +455,93 @@ fn parse_lang(bytes: &[u8]) -> Result<BTreeMap<String, String>, Box<dyn std::err
     let mut values = BTreeMap::new();
     for (i, line) in lines.iter().enumerate() {
         let key = line.trim();
-        if key.is_empty()
-            || lines
-                .get(i + 1)
-                .is_none_or(|separator| !separator.is_empty())
-            || !key
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b':')
-        {
+        if !is_lang_key(key) {
             continue;
         }
-        if let Some(value) = lines.get(i + 2).filter(|value| !value.is_empty()) {
-            values.insert(key.to_owned(), (*value).to_owned());
+        let Some(second) = lines.get(i + 1) else {
+            continue;
+        };
+        if second.is_empty() {
+            if let Some(value) = lines.get(i + 2).filter(|value| !value.is_empty()) {
+                values.insert(key.to_owned(), (*value).to_owned());
+            }
+        } else if !key.bytes().all(|byte| byte.is_ascii_digit()) && is_symbolic_description(second)
+        {
+            if let Some(value) = lines.get(i + 2).filter(|value| !value.is_empty()) {
+                values.insert(key.to_owned(), (*value).to_owned());
+            }
         }
     }
     Ok(values)
 }
 
-fn wizard_zone_header_value(bytes: &[u8], path: &str) -> Option<String> {
+fn is_lang_key(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b':')
+}
+
+fn is_symbolic_description(value: &str) -> bool {
+    let description = value.trim().to_ascii_lowercase();
+    description.starts_with("zone name for ") || description == "name of commons zone"
+}
+
+fn localization_for_header<'a>(
+    header: &str,
+    zone_lang: &'a BTreeMap<String, String>,
+    housing_lang: &'a BTreeMap<String, String>,
+    wizard_zone_lang: &'a BTreeMap<String, String>,
+) -> Option<&'a String> {
+    let (source, key) = if let Some(key) = header.strip_prefix("Zone_") {
+        (zone_lang, key)
+    } else if let Some(key) = header.strip_prefix("Housing_") {
+        (housing_lang, key)
+    } else {
+        (wizard_zone_lang, header.strip_prefix("WizardZone_")?)
+    };
+    source.get(key)
+}
+
+fn candidate_from_header(
+    header: Option<&str>,
+    zone_lang: &BTreeMap<String, String>,
+    housing_lang: &BTreeMap<String, String>,
+    wizard_zone_lang: &BTreeMap<String, String>,
+) -> Option<Candidate> {
+    let header = header?;
+    let (source, value) = if header.starts_with("Zone_") {
+        (
+            Source::ZoneHeader,
+            localization_for_header(header, zone_lang, housing_lang, wizard_zone_lang)?,
+        )
+    } else if header.starts_with("Housing_") {
+        (
+            Source::HousingHeader,
+            localization_for_header(header, zone_lang, housing_lang, wizard_zone_lang)?,
+        )
+    } else if header.starts_with("WizardZone_") {
+        (
+            Source::WizardZone,
+            localization_for_header(header, zone_lang, housing_lang, wizard_zone_lang)?,
+        )
+    } else {
+        return None;
+    };
+    let valid = if matches!(source, Source::ZoneHeader | Source::HousingHeader) {
+        valid_direct_header_name(value)
+    } else {
+        valid_localized_name(value)
+    };
+    valid.then(|| Candidate {
+        source,
+        name: value.clone(),
+    })
+}
+
+fn zone_header_field_value(bytes: &[u8], path: &str) -> Option<String> {
     const PATH_MARKER: &[u8] = b"\xf8\x63\x69\x81";
-    const WIZARD_ZONE_MARKER: &[u8] = b"\x6e\xec\xf6\x74";
+    const LOCALIZATION_MARKER: &[u8] = b"\x6e\xec\xf6\x74";
     let mut cursor = 0;
     while let Some(marker) = find_from(bytes, PATH_MARKER, cursor) {
         let length_start = marker + PATH_MARKER.len();
@@ -372,24 +551,22 @@ fn wizard_zone_header_value(bytes: &[u8], path: &str) -> Option<String> {
         let path_end = path_start.checked_add(path_length)?;
         if bytes.get(path_start..path_end) == Some(path.as_bytes()) {
             let field_marker = path_end.checked_add(4)?;
-            if bytes.get(field_marker..field_marker + WIZARD_ZONE_MARKER.len())
-                != Some(WIZARD_ZONE_MARKER)
+            if bytes.get(field_marker..field_marker + LOCALIZATION_MARKER.len())
+                != Some(LOCALIZATION_MARKER)
             {
                 return None;
             }
-            let value_length_start = field_marker + WIZARD_ZONE_MARKER.len();
+            let value_length_start = field_marker + LOCALIZATION_MARKER.len();
             let value_length_bytes = bytes.get(value_length_start..value_length_start + 2)?;
             let value_length =
                 u16::from_le_bytes([value_length_bytes[0], value_length_bytes[1]]) as usize;
             let value_start = value_length_start + 2;
             let value =
                 std::str::from_utf8(bytes.get(value_start..value_start + value_length)?).ok()?;
-            return (value.starts_with("WizardZone_")
-                && value.len() > "WizardZone_".len()
-                && value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'))
-            .then(|| value.to_owned());
+            return value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                .then(|| value.to_owned());
         }
         cursor = path_end;
     }
@@ -700,6 +877,8 @@ pub fn write_diagnostics(zones: &[Zone], output: &Path) -> Result<(), Box<dyn st
             });
             serde_json::json!({
                 "path": zone.path,
+                "header_field_value": zone.header_field_value,
+                "header_localized_value": zone.header_localized_value,
                 "header_wizard_zone": zone.header_wizard_zone,
                 "candidates": candidates,
                 "selected": selected,
@@ -726,6 +905,12 @@ pub fn diagnostics_path(output: &Path) -> PathBuf {
 fn candidate_provenance(source: Source) -> &'static str {
     match source {
         Source::CompassPoi => "proven parent POI localization and matching child transition chain",
+        Source::ZoneHeader => {
+            "exact current-zone header localization key resolved through Zone.lang"
+        }
+        Source::HousingHeader => {
+            "exact current-zone header localization key resolved through Housing.lang"
+        }
         Source::WizardZone => "exact zone-header WizardZone field resolved through WizardZone.lang",
         Source::SharedMap => "DoodleMapMap association to map resource and Zone.lang key",
     }
@@ -755,7 +940,8 @@ mod tests {
         let poi = one("Pit of the Noxii");
         let wizard = one("Mount Olympus");
         let map = one("Mount Olympus");
-        let (selected, confidence, ambiguity, conflicts) = select_candidate(&poi, &wizard, &map);
+        let (selected, confidence, ambiguity, conflicts) =
+            select_candidate(&poi, &BTreeSet::new(), &BTreeSet::new(), &wizard, &map);
         assert_eq!(selected.unwrap().name, "Pit of the Noxii");
         assert_eq!(confidence, Confidence::Verified);
         assert_eq!(ambiguity, None);
@@ -765,8 +951,13 @@ mod tests {
     #[test]
     fn wizard_zone_only_is_explicit_fallback() {
         let wizard = one("Stonegaze’s Antichamber");
-        let (selected, confidence, ambiguity, _) =
-            select_candidate(&BTreeSet::new(), &wizard, &BTreeSet::new());
+        let (selected, confidence, ambiguity, _) = select_candidate(
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &wizard,
+            &BTreeSet::new(),
+        );
         assert_eq!(selected.unwrap().name, "Stonegaze’s Antichamber");
         assert_eq!(confidence, Confidence::UnverifiedFallback);
         assert!(ambiguity.unwrap().contains("unverified fallback"));
@@ -776,8 +967,13 @@ mod tests {
     fn conflicting_wizard_zone_and_map_select_fallback_and_report_conflict() {
         let wizard = one("Infirmary");
         let map = one("Arcanum");
-        let (selected, confidence, ambiguity, conflicts) =
-            select_candidate(&BTreeSet::new(), &wizard, &map);
+        let (selected, confidence, ambiguity, conflicts) = select_candidate(
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &wizard,
+            &map,
+        );
         assert_eq!(selected.unwrap().name, "Infirmary");
         assert_eq!(confidence, Confidence::UnverifiedFallback);
         assert!(ambiguity.unwrap().contains("candidate conflict"));
@@ -797,8 +993,13 @@ mod tests {
         for (expected_specific_name, wizard_name, map_name) in cases {
             let wizard = one(wizard_name);
             let map = one(map_name);
-            let (selected, confidence, ambiguity, _) =
-                select_candidate(&BTreeSet::new(), &wizard, &map);
+            let (selected, confidence, ambiguity, _) = select_candidate(
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+                &wizard,
+                &map,
+            );
             assert_eq!(
                 selected.unwrap().name,
                 wizard_name,
@@ -812,8 +1013,13 @@ mod tests {
     #[test]
     fn no_candidate_is_unknown_and_malformed_map_is_rejected() {
         assert!(!valid_map_title("Wizard City|Firecat Alley"));
-        let (selected, confidence, ambiguity, _) =
-            select_candidate(&BTreeSet::new(), &BTreeSet::new(), &BTreeSet::new());
+        let (selected, confidence, ambiguity, _) = select_candidate(
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+        );
         assert!(selected.is_none());
         assert_eq!(confidence, Confidence::Unknown);
         assert!(ambiguity.is_none());
@@ -825,8 +1031,13 @@ mod tests {
         let map = ["Crab Alley".to_owned(), "Deep Warrens".to_owned()]
             .into_iter()
             .collect();
-        let (selected, confidence, ambiguity, _) =
-            select_candidate(&BTreeSet::new(), &wizard, &map);
+        let (selected, confidence, ambiguity, _) = select_candidate(
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &wizard,
+            &map,
+        );
         assert_eq!(selected.unwrap().name, "Triton Avenue");
         assert_eq!(confidence, Confidence::UnverifiedFallback);
         assert!(ambiguity.unwrap().contains("conflicting shared-map"));
@@ -859,16 +1070,83 @@ mod tests {
         let mut bytes = header(path, "WizardZone_TritonAvenue");
         bytes.extend(b"later\0WizardZone_00001603");
         assert_eq!(
-            wizard_zone_header_value(&bytes, path),
+            zone_header_field_value(&bytes, path),
             Some("WizardZone_TritonAvenue".into())
         );
         assert_eq!(
-            wizard_zone_header_value(&header(path, "WizardZone_00001603"), path),
+            zone_header_field_value(&header(path, "WizardZone_00001603"), path),
             Some("WizardZone_00001603".into())
         );
         assert_eq!(
-            wizard_zone_header_value(b"path\0WizardZone_00001603", path),
+            zone_header_field_value(b"path\0WizardZone_00001603", path),
             None
         );
+    }
+
+    #[test]
+    fn direct_zone_and_housing_header_candidates_are_verified() {
+        let zone = one("Hall of the Ice Forge");
+        let map = one("Hall of the Ice Forge");
+        let (selected, confidence, ambiguity, _) = select_candidate(
+            &BTreeSet::new(),
+            &zone,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &map,
+        );
+        assert_eq!(selected.unwrap().source, Source::ZoneHeader);
+        assert_eq!(confidence, Confidence::Verified);
+        assert_eq!(ambiguity, None);
+
+        let housing = one("Meadows at Dusk");
+        let (selected, confidence, _, _) = select_candidate(
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &housing,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+        );
+        assert_eq!(selected.unwrap().name, "Meadows at Dusk");
+        assert_eq!(confidence, Confidence::Verified);
+    }
+
+    #[test]
+    fn symbolic_wizard_zone_entries_with_explicit_descriptions_resolve() {
+        let lang = "1:WizardZone\nTheCommons\nName of commons zone\nThe Commons\nRavenwood\nzone name for Ravenwood\nRavenwood\nUnicornWay\nZone name for Unicorn Way\nUnicorn Way\n";
+        let parsed = parse_lang(&utf16(lang)).unwrap();
+        assert_eq!(
+            parsed.get("TheCommons").map(String::as_str),
+            Some("The Commons")
+        );
+        assert_eq!(
+            parsed.get("Ravenwood").map(String::as_str),
+            Some("Ravenwood")
+        );
+        assert_eq!(
+            parsed.get("UnicornWay").map(String::as_str),
+            Some("Unicorn Way")
+        );
+    }
+
+    #[test]
+    fn test_placeholder_zone_header_is_not_a_display_candidate() {
+        assert!(!valid_direct_header_name("TEST-Interior"));
+        let candidate = candidate_from_header(
+            Some("Zone_00001518"),
+            &[("00001518".to_owned(), "TEST-Interior".to_owned())]
+                .into_iter()
+                .collect(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        );
+        assert!(candidate.is_none());
+    }
+
+    fn utf16(text: &str) -> Vec<u8> {
+        let mut bytes = vec![0xff, 0xfe];
+        for unit in text.encode_utf16() {
+            bytes.extend(unit.to_le_bytes());
+        }
+        bytes
     }
 }

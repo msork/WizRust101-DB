@@ -9,14 +9,27 @@ fn utf16(text: &str) -> Vec<u8> {
 }
 
 fn make_zone(root: &std::path::Path, folder: &str, path: &str, wizard_key: Option<&str>) {
+    make_zone_with_header(
+        root,
+        folder,
+        path,
+        wizard_key.map(|key| format!("WizardZone_{key}")),
+    );
+}
+
+fn make_zone_with_header(
+    root: &std::path::Path,
+    folder: &str,
+    path: &str,
+    header_value: Option<String>,
+) {
     let directory = root.join(folder);
     fs::create_dir_all(&directory).unwrap();
     let mut bytes = b"\xf8\x63\x69\x81".to_vec();
     bytes.extend((path.len() as u16).to_le_bytes());
     bytes.extend(path.as_bytes());
     bytes.extend([0xe8, 0, 0, 0]);
-    if let Some(key) = wizard_key {
-        let value = format!("WizardZone_{key}");
+    if let Some(value) = header_value {
         bytes.extend(b"\x6e\xec\xf6\x74");
         bytes.extend((value.len() as u16).to_le_bytes());
         bytes.extend(value.as_bytes());
@@ -40,11 +53,15 @@ fn resolves_candidates_writes_unknowns_and_records_header_provenance() {
     let hall = "Aquila/Interiors/AQ_SkelKey_Hall_01";
     let conflicted = "Arcanum/Interiors/AR_Z01_Infirmary";
     let unresolved = "NoWorld/NoMap";
+    let house = "Housing_AV_BAC/Exterior";
+    let dusk = "Housing_BuildACastleProto/Exterior_Dusk";
     make_zone(&raw, "parent", parent, Some("00001029"));
     make_zone(&raw, "pit", pit, Some("00001029"));
     make_zone(&raw, "hall", hall, Some("00001603"));
     make_zone(&raw, "infirmary", conflicted, Some("00001387"));
     make_zone(&raw, "unknown", unresolved, None);
+    make_zone_with_header(&raw, "house", house, Some("Zone_00001374".to_owned()));
+    make_zone_with_header(&raw, "dusk", dusk, Some("Housing_00000832".to_owned()));
     fs::OpenOptions::new()
         .append(true)
         .open(raw.join("unknown/gamedata.bin"))
@@ -82,12 +99,17 @@ fn resolves_candidates_writes_unknowns_and_records_header_provenance() {
     fs::create_dir_all(&locale).unwrap();
     fs::write(
         locale.join("Zone.lang"),
-        utf16("1:Zone\n00000001\n\nMount Olympus\n00000003\n\nArcanum\n"),
+        utf16("1:Zone\n00000001\n\nMount Olympus\n00000003\n\nArcanum\n00001374\n\nAvalon Castle Plot\n"),
     )
     .unwrap();
     fs::write(
         locale.join("WizardZone.lang"),
         utf16("1:WizardZone\n00001029\n\nMount Olympus\n00001603\n\nStonegaze’s Antichamber\n00001387\n\nInfirmary\nTritonAvenue\n\nTriton Avenue\n"),
+    )
+    .unwrap();
+    fs::write(
+        locale.join("Housing.lang"),
+        utf16("1:Housing\n00000832\n\nMeadows at Dusk\n"),
     )
     .unwrap();
     fs::write(
@@ -120,6 +142,8 @@ fn resolves_candidates_writes_unknowns_and_records_header_provenance() {
     assert_eq!(json[conflicted], "Infirmary");
     assert_eq!(json[unresolved], "Unknown");
     assert_eq!(json[triton], "Triton Avenue");
+    assert_eq!(json[house], "Avalon Castle Plot");
+    assert_eq!(json[dusk], "Meadows at Dusk");
     let diagnostics_path = output.with_file_name("zones.diagnostics.json");
     let diagnostics: serde_json::Value =
         serde_json::from_slice(&fs::read(diagnostics_path).unwrap()).unwrap();
@@ -137,6 +161,21 @@ fn resolves_candidates_writes_unknowns_and_records_header_provenance() {
         triton_diagnostic["selected"]["confidence"],
         "unverified_fallback"
     );
+    let house_diagnostic = diagnostics
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["path"] == house)
+        .unwrap();
+    assert_eq!(house_diagnostic["selected"]["source"], "ZoneHeader");
+    assert_eq!(house_diagnostic["selected"]["confidence"], "verified");
+    let dusk_diagnostic = diagnostics
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["path"] == dusk)
+        .unwrap();
+    assert_eq!(dusk_diagnostic["selected"]["source"], "HousingHeader");
     let stderr = String::from_utf8(result.stderr).unwrap();
     let stdout = String::from_utf8(result.stdout).unwrap();
     assert!(stderr.contains("CompassPoi=\"Pit of the Noxii\""));
