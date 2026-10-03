@@ -1,4 +1,4 @@
-use std::{fs, process::Command};
+use std::{fs, io::Write, process::Command};
 
 fn utf16(text: &str) -> Vec<u8> {
     let mut bytes = vec![0xff, 0xfe];
@@ -11,14 +11,17 @@ fn utf16(text: &str) -> Vec<u8> {
 fn make_zone(root: &std::path::Path, folder: &str, path: &str, wizard_key: Option<&str>) {
     let directory = root.join(folder);
     fs::create_dir_all(&directory).unwrap();
-    let key = wizard_key
-        .map(|key| format!("WizardZone_{key}\0"))
-        .unwrap_or_default();
-    fs::write(
-        directory.join("gamedata.bin"),
-        format!("zone metadata\0{path}\0{key}"),
-    )
-    .unwrap();
+    let mut bytes = b"\xf8\x63\x69\x81".to_vec();
+    bytes.extend((path.len() as u16).to_le_bytes());
+    bytes.extend(path.as_bytes());
+    bytes.extend([0xe8, 0, 0, 0]);
+    if let Some(key) = wizard_key {
+        let value = format!("WizardZone_{key}");
+        bytes.extend(b"\x6e\xec\xf6\x74");
+        bytes.extend((value.len() as u16).to_le_bytes());
+        bytes.extend(value.as_bytes());
+    }
+    fs::write(directory.join("gamedata.bin"), bytes).unwrap();
 }
 
 fn map_record(map: &str, path: &str) -> Vec<u8> {
@@ -26,7 +29,7 @@ fn map_record(map: &str, path: &str) -> Vec<u8> {
 }
 
 #[test]
-fn resolves_poi_and_wizard_candidates_reports_conflicts_and_omits_unknowns() {
+fn resolves_candidates_writes_unknowns_and_records_header_provenance() {
     let temp = std::env::temp_dir().join(format!("wizrust-evidence-{}", std::process::id()));
     let raw = temp.join("raw");
     let maps = raw.join("misc/GUI-WorldData/Maps");
@@ -42,6 +45,12 @@ fn resolves_poi_and_wizard_candidates_reports_conflicts_and_omits_unknowns() {
     make_zone(&raw, "hall", hall, Some("00001603"));
     make_zone(&raw, "infirmary", conflicted, Some("00001387"));
     make_zone(&raw, "unknown", unresolved, None);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(raw.join("unknown/gamedata.bin"))
+        .unwrap()
+        .write_all(b"\0later WizardZone_00001603")
+        .unwrap();
 
     fs::write(maps.join("olympus.xml"), b"Zone_00000001\0Zone_00000002").unwrap();
     let mut doodle = map_record("olympus.xml", parent);
@@ -78,7 +87,7 @@ fn resolves_poi_and_wizard_candidates_reports_conflicts_and_omits_unknowns() {
     .unwrap();
     fs::write(
         locale.join("WizardZone.lang"),
-        utf16("1:WizardZone\n00001029\n\nMount Olympus\n00001603\n\nStonegaze’s Antichamber\n00001387\n\nInfirmary\n"),
+        utf16("1:WizardZone\n00001029\n\nMount Olympus\n00001603\n\nStonegaze’s Antichamber\n00001387\n\nInfirmary\nTritonAvenue\n\nTriton Avenue\n"),
     )
     .unwrap();
     fs::write(
@@ -86,6 +95,8 @@ fn resolves_poi_and_wizard_candidates_reports_conflicts_and_omits_unknowns() {
         utf16("1:WizardCompassLocs\n00000135\n\nPit of the Noxii\n"),
     )
     .unwrap();
+    let triton = "WizardCity/WC_Streets/WC_Triton";
+    make_zone(&raw, "triton", triton, Some("TritonAvenue"));
     let reference = temp.join("reference.json");
     fs::write(
         &reference,
@@ -105,9 +116,27 @@ fn resolves_poi_and_wizard_candidates_reports_conflicts_and_omits_unknowns() {
     assert!(result.status.success());
     let json: serde_json::Value = serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
     assert_eq!(json[pit], "Pit of the Noxii");
-    assert!(json.get(hall).is_none());
-    assert!(json.get(conflicted).is_none());
-    assert!(json.get(unresolved).is_none());
+    assert_eq!(json[hall], "Stonegaze’s Antichamber");
+    assert_eq!(json[conflicted], "Infirmary");
+    assert_eq!(json[unresolved], "Unknown");
+    assert_eq!(json[triton], "Triton Avenue");
+    let diagnostics_path = output.with_file_name("zones.diagnostics.json");
+    let diagnostics: serde_json::Value =
+        serde_json::from_slice(&fs::read(diagnostics_path).unwrap()).unwrap();
+    let triton_diagnostic = diagnostics
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["path"] == triton)
+        .unwrap();
+    assert_eq!(
+        triton_diagnostic["header_wizard_zone"],
+        "WizardZone_TritonAvenue"
+    );
+    assert_eq!(
+        triton_diagnostic["selected"]["confidence"],
+        "unverified_fallback"
+    );
     let stderr = String::from_utf8(result.stderr).unwrap();
     let stdout = String::from_utf8(result.stdout).unwrap();
     assert!(stderr.contains("CompassPoi=\"Pit of the Noxii\""));
@@ -116,7 +145,7 @@ fn resolves_poi_and_wizard_candidates_reports_conflicts_and_omits_unknowns() {
     assert!(stderr.contains("reference conflict"));
     assert!(stderr
         .contains("conflicts=[WizardZone=\"Infirmary\" conflicts with SharedMap=\"Arcanum\"]"));
-    assert!(stderr.contains("unsupported WizardZone-only candidate"));
+    assert!(stderr.contains("unverified_fallback"));
     assert!(stdout.contains("mismatches: 1"));
     let _ = fs::remove_dir_all(temp);
 }

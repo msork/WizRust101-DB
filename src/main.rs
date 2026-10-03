@@ -39,6 +39,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let discovered = zones::discover(&input)?;
     zones::write_json(&discovered, &output)?;
+    zones::write_diagnostics(&discovered, &output)?;
     report_generation(&discovered, &output);
     if command == "compare" {
         compare(&discovered, &output, &reference)?;
@@ -47,15 +48,28 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn report_generation(zones: &[Zone], output: &std::path::Path) {
-    let selected = zones.iter().filter(|zone| zone.selected.is_some()).count();
-    let unresolved = zones.len() - selected;
+    let verified = zones
+        .iter()
+        .filter(|zone| zone.confidence == zones::Confidence::Verified)
+        .count();
+    let fallback = zones
+        .iter()
+        .filter(|zone| zone.confidence == zones::Confidence::UnverifiedFallback)
+        .count();
+    let unknown = zones
+        .iter()
+        .filter(|zone| zone.confidence == zones::Confidence::Unknown)
+        .count();
     eprintln!(
-        "wrote {selected} resolved zones to {} ({unresolved} unresolved)",
-        output.display()
+        "wrote {} zones to {} (verified={verified}, unverified_fallback={fallback}, Unknown={unknown}); diagnostics={}",
+        zones.len(), output.display(), zones::diagnostics_path(output).display()
     );
     report_source_summary(zones);
     for zone in zones {
-        if zone.selected.is_none() || zone.ambiguity.is_some() || !zone.conflicts.is_empty() {
+        if zone.confidence == zones::Confidence::Unknown
+            || zone.ambiguity.is_some()
+            || !zone.conflicts.is_empty()
+        {
             eprintln!("{}", trace(zone));
         }
     }
@@ -103,10 +117,12 @@ fn trace(zone: &Zone) -> String {
         .selected
         .as_ref()
         .map(format_selected)
-        .unwrap_or_else(|| "none".into());
+        .unwrap_or_else(|| "Unknown".into());
     let mut details = vec![
         format!("candidates=[{candidates}]"),
         format!("selected={selected}"),
+        format!("confidence={}", zone.confidence.label()),
+        format!("provenance={:?}", zone.selection_provenance),
     ];
     if let Some(ambiguity) = &zone.ambiguity {
         details.push(format!("ambiguity={ambiguity:?}"));
@@ -145,14 +161,12 @@ fn compare(
     let (mut exact, mut mismatch, mut missing, mut new) = (0, 0, 0, 0);
     for (key, reference_name) in &expected {
         match generated.get(key) {
-            Some(actual) if actual == reference_name => exact += 1,
-            Some(actual) => {
-                mismatch += 1;
-                eprintln!(
-                    "reference conflict {key}: reference={reference_name:?}, selected={actual:?}"
-                );
+            Some(actual) if actual == "Unknown" => {
+                missing += 1;
                 if let Some(zone) = by_path.get(key.as_str()) {
-                    eprintln!("{}", trace(zone));
+                    eprintln!("unresolved reference zone: {}", trace(zone));
+                } else {
+                    eprintln!("reference zone absent from raw: {key}");
                 }
             }
             None => {
@@ -163,10 +177,20 @@ fn compare(
                     eprintln!("reference zone absent from raw: {key}");
                 }
             }
+            Some(actual) if actual == reference_name => exact += 1,
+            Some(actual) => {
+                mismatch += 1;
+                eprintln!(
+                    "reference conflict {key}: reference={reference_name:?}, selected={actual:?}"
+                );
+                if let Some(zone) = by_path.get(key.as_str()) {
+                    eprintln!("{}", trace(zone));
+                }
+            }
         }
     }
-    for key in generated.keys() {
-        if !expected.contains_key(key) {
+    for (key, value) in &generated {
+        if !expected.contains_key(key) && value != "Unknown" {
             new += 1;
             if let Some(zone) = by_path.get(key.as_str()) {
                 eprintln!("generated-only zone: {}", trace(zone));
