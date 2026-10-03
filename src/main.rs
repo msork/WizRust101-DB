@@ -20,7 +20,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let command = args.next().unwrap_or_else(|| "generate".into());
     let mut input = PathBuf::from("raw");
     let mut output = PathBuf::from("out/zones.json");
-    let mut reference = PathBuf::from("/home/maxim/Downloads/zones.json");
+    let mut reference = PathBuf::from("tmp/zones.json");
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--input" => input = args.next().ok_or("--input needs a path")?.into(),
