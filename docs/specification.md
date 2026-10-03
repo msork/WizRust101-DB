@@ -32,7 +32,7 @@ The comparison oracle defaults to `tmp/zones.json` and can be overridden with `-
 
 ## Output and deterministic behavior
 
-`out/zones.json` is a UTF-8, two-space-indented JSON object mapping every discovered canonical path to an extracted display string or the literal `Unknown` when no usable localized name exists:
+`out/zones.json` is the RPC-facing database: a UTF-8, two-space-indented JSON object mapping every discovered canonical path to a string, either the best available extracted display name or the literal `Unknown` when no usable localized name exists. No discovered path is omitted because its name is uncertain. The sidecar diagnostics are not part of this schema and cannot alter selected names or JSON bytes:
 
 ```json
 {
@@ -40,7 +40,7 @@ The comparison oracle defaults to `tmp/zones.json` and can be overridden with `-
 }
 ```
 
-Sort keys lexicographically and terminate with a newline. Create the output directory when missing. Never write beneath or modify `raw/`. No identifier-derived fallback is permitted.
+Sort keys lexicographically and terminate with a newline. Create the output directory when missing. Diagnostics are written separately and never feed back into generation. `generate` does not read the reference oracle, even when the configured reference path is missing. Refuse an output JSON or diagnostics path beneath the canonical input root; generation never writes to or modifies `raw/`. No identifier-derived fallback is permitted.
 
 Write a separate deterministic diagnostics sidecar beside the output as `<output-stem>.diagnostics.json` (for example, `out/zones.diagnostics.json`). For every discovered path it records candidates with source and provenance, the selected value/source/confidence/provenance, the exact immediate header field value and its localized value when available, candidate conflicts, and ambiguity/unresolved reasons. Confidence is `verified` for proven Compass, direct Zone/Housing header, or uncontested shared-map selections, `unverified_fallback` for header WizardZone selections, and `unknown` for `Unknown` output values. A validation reference never changes this record or its selection.
 
@@ -52,7 +52,7 @@ Malformed CLI arguments, unreadable required metadata, duplicate canonical keys 
 
 ## Tests and validation
 
-Unit and fixture integration tests cover proven direct/child resolution, the Pit of the Noxii POI chain, direct Zone/Housing header localization, numeric and symbolic WizardZone header keys, description-bearing symbolic localization rows, ignoring later WizardZone references, WizardZone fallback provenance, conflicts, `Unknown`, invalid map labels, special interiors (Gorgon Cave, Vestrilund, Zeus Exalted Duel, Altar of Kings, Triton, Stonegaze's Antichamber), localization parsing, reference comparisons, and deterministic JSON. Run `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test`. Generate with `cargo run -- generate --input raw --output out/zones.json`; this also writes `out/zones.diagnostics.json`. Validate with `cargo run -- compare --input raw --reference tmp/zones.json`.
+Unit and fixture integration tests cover proven direct/child resolution, the Pit of the Noxii POI chain, direct Zone/Housing header localization, numeric and symbolic WizardZone header keys, description-bearing symbolic localization rows, ignoring later WizardZone references, WizardZone fallback provenance, conflicts, `Unknown`, invalid map labels, special interiors (Gorgon Cave, Vestrilund, Zeus Exalted Duel, Altar of Kings, Triton, Stonegaze's Antichamber), localization parsing, reference comparisons, deterministic output despite diagnostics changes, and generation without an oracle. Run `cargo fmt --check`, `cargo clippy --locked -- -D warnings`, and `cargo test --locked`. From a clean clone, first run `cargo build --locked` and `cargo test --locked`; extracted game data is not committed and must be placed in `raw/`. Generate with `cargo run --locked -- generate --input raw --output out/zones.json`; this also writes `out/zones.diagnostics.json`. The generated `out/zones.json` is consumed directly by WizRust101-RPC as a path-to-string name database. Validate separately with `cargo run --locked -- compare --input raw --reference tmp/zones.json`.
 
 ## Known limitations
 

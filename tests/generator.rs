@@ -1,4 +1,4 @@
-use std::{fs, io::Write, process::Command};
+use std::{fs, io::Write, path::Path, process::Command};
 
 fn utf16(text: &str) -> Vec<u8> {
     let mut bytes = vec![0xff, 0xfe];
@@ -137,6 +137,9 @@ fn resolves_candidates_writes_unknowns_and_records_header_provenance() {
         .unwrap();
     assert!(result.status.success());
     let json: serde_json::Value = serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
+    let generated = json.as_object().unwrap();
+    assert_eq!(generated.len(), 8);
+    assert!(generated.values().all(serde_json::Value::is_string));
     assert_eq!(json[pit], "Pit of the Noxii");
     assert_eq!(json[hall], "Stonegaze’s Antichamber");
     assert_eq!(json[conflicted], "Infirmary");
@@ -146,7 +149,7 @@ fn resolves_candidates_writes_unknowns_and_records_header_provenance() {
     assert_eq!(json[dusk], "Meadows at Dusk");
     let diagnostics_path = output.with_file_name("zones.diagnostics.json");
     let diagnostics: serde_json::Value =
-        serde_json::from_slice(&fs::read(diagnostics_path).unwrap()).unwrap();
+        serde_json::from_slice(&fs::read(&diagnostics_path).unwrap()).unwrap();
     let triton_diagnostic = diagnostics
         .as_array()
         .unwrap()
@@ -186,5 +189,102 @@ fn resolves_candidates_writes_unknowns_and_records_header_provenance() {
         .contains("conflicts=[WizardZone=\"Infirmary\" conflicts with SharedMap=\"Arcanum\"]"));
     assert!(stderr.contains("unverified_fallback"));
     assert!(stdout.contains("mismatches: 1"));
+
+    let zones_bytes = fs::read(&output).unwrap();
+    let diagnostics_bytes = fs::read(&diagnostics_path).unwrap();
+    fs::write(&diagnostics_path, b"deliberately corrupted diagnostics").unwrap();
+    let second = Command::new(env!("CARGO_BIN_EXE_wizrust101-db"))
+        .args(["compare", "--input"])
+        .arg(&raw)
+        .arg("--output")
+        .arg(&output)
+        .arg("--reference")
+        .arg(&reference)
+        .output()
+        .unwrap();
+    assert!(second.status.success());
+    assert_eq!(fs::read(&output).unwrap(), zones_bytes);
+    assert_eq!(fs::read(&diagnostics_path).unwrap(), diagnostics_bytes);
     let _ = fs::remove_dir_all(temp);
+}
+
+#[test]
+fn generate_needs_no_oracle_and_never_writes_under_raw() {
+    let temp = std::env::temp_dir().join(format!("wizrust-no-oracle-{}", std::process::id()));
+    let raw = temp.join("raw");
+    make_zone(&raw, "zone", "Fixture/UnknownZone", None);
+    let locale = raw.join("misc/Root/Locale/en-US");
+    fs::create_dir_all(&locale).unwrap();
+    for name in [
+        "Zone.lang",
+        "Housing.lang",
+        "WizardZone.lang",
+        "WizardCompassLocs.lang",
+    ] {
+        fs::write(locale.join(name), utf16("1:fixture\n")).unwrap();
+    }
+    fs::write(raw.join("misc/Root/DoodleMapMap.xml"), []).unwrap();
+    let before = snapshot(&raw);
+
+    let forbidden_output = raw.join("generated/zones.json");
+    let rejected = Command::new(env!("CARGO_BIN_EXE_wizrust101-db"))
+        .args(["generate", "--input"])
+        .arg(&raw)
+        .arg("--output")
+        .arg(&forbidden_output)
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(!raw.join("generated").exists());
+
+    let output = temp.join("out/nested/zones.json");
+    let missing_oracle = temp.join("does-not-exist/reference.json");
+    let generated = Command::new(env!("CARGO_BIN_EXE_wizrust101-db"))
+        .args(["generate", "--input"])
+        .arg(&raw)
+        .arg("--output")
+        .arg(&output)
+        .arg("--reference")
+        .arg(&missing_oracle)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
+    assert_eq!(json.as_object().unwrap().len(), 1);
+    assert_eq!(json["Fixture/UnknownZone"], "Unknown");
+    let diagnostics_path = output.with_file_name("zones.diagnostics.json");
+    let diagnostics: serde_json::Value =
+        serde_json::from_slice(&fs::read(diagnostics_path).unwrap()).unwrap();
+    assert_eq!(diagnostics.as_array().unwrap().len(), 1);
+    assert_eq!(diagnostics[0]["confidence"], "unknown");
+    assert_eq!(snapshot(&raw), before);
+    let _ = fs::remove_dir_all(temp);
+}
+
+fn snapshot(root: &Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    fn collect(root: &Path, current: &Path, files: &mut Vec<std::path::PathBuf>) {
+        for entry in fs::read_dir(current).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect(root, &path, files);
+            } else {
+                files.push(path.strip_prefix(root).unwrap().to_path_buf());
+            }
+        }
+    }
+    let mut paths = Vec::new();
+    collect(root, root, &mut paths);
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| {
+            let bytes = fs::read(root.join(&path)).unwrap();
+            (path, bytes)
+        })
+        .collect()
 }

@@ -38,6 +38,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let discovered = zones::discover(&input)?;
+    reject_output_under_raw(&input, &output)?;
     zones::write_json(&discovered, &output)?;
     zones::write_diagnostics(&discovered, &output)?;
     report_generation(&discovered, &output);
@@ -45,6 +46,63 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         compare(&discovered, &output, &reference)?;
     }
     Ok(())
+}
+
+fn reject_output_under_raw(
+    input: &std::path::Path,
+    output: &std::path::Path,
+) -> std::io::Result<()> {
+    let raw_root = fs::canonicalize(input)?;
+    for candidate in [output.to_path_buf(), zones::diagnostics_path(output)] {
+        let resolved = resolve_destination(&candidate)?;
+        if resolved.starts_with(&raw_root) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "refusing to write output beneath raw input root {}: {}",
+                    raw_root.display(),
+                    resolved.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn resolve_destination(path: &std::path::Path) -> std::io::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+
+    let mut existing = normalized.clone();
+    let mut suffix = Vec::new();
+    while !existing.exists() {
+        let name = existing.file_name().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("no existing parent for output path {}", path.display()),
+            )
+        })?;
+        suffix.push(name.to_os_string());
+        existing.pop();
+    }
+    let mut resolved = fs::canonicalize(existing)?;
+    for name in suffix.into_iter().rev() {
+        resolved.push(name);
+    }
+    Ok(resolved)
 }
 
 fn report_generation(zones: &[Zone], output: &std::path::Path) {
