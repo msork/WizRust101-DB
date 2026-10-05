@@ -53,6 +53,7 @@ fn resolves_candidates_writes_unknowns_and_records_header_provenance() {
     let hall = "Aquila/Interiors/AQ_SkelKey_Hall_01";
     let conflicted = "Arcanum/Interiors/AR_Z01_Infirmary";
     let unresolved = "NoWorld/NoMap";
+    let phantom = "ThePhantomZoneWorld/DoodleDougPhantomZoneP";
     let alias = "DragonSpire/DS_Hub_Cathedral";
     let special = "G14_DM/DM_Z01_CastleDarkmoor";
     let zigazag = "G14_HS/HS_Z01_ZigazagUpper";
@@ -65,6 +66,7 @@ fn resolves_candidates_writes_unknowns_and_records_header_provenance() {
     make_zone(&raw, "hall", hall, Some("00001603"));
     make_zone(&raw, "infirmary", conflicted, Some("00001387"));
     make_zone(&raw, "unknown", unresolved, None);
+    make_zone(&raw, "phantom", phantom, None);
     make_zone(&raw, "alias", alias, None);
     make_zone(&raw, "special", special, None);
     make_zone(&raw, "zigazag", zigazag, None);
@@ -153,7 +155,7 @@ fn resolves_candidates_writes_unknowns_and_records_header_provenance() {
     assert!(result.status.success());
     let json: serde_json::Value = serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
     let generated = json.as_object().unwrap();
-    assert_eq!(generated.len(), 13);
+    assert_eq!(generated.len(), 14);
     assert!(generated.values().all(|entry| {
         entry.is_object() && entry["world"].is_string() && entry["zone"].is_string()
     }));
@@ -161,18 +163,20 @@ fn resolves_candidates_writes_unknowns_and_records_header_provenance() {
     assert_eq!(json[pit]["world"], "Aquila");
     assert_eq!(json[hall]["zone"], "Stonegaze’s Antichamber");
     assert_eq!(json[conflicted]["zone"], "Infirmary");
-    assert_eq!(json[unresolved]["zone"], "Unknown");
-    assert_eq!(json[unresolved]["world"], "NoWorld");
+    assert_eq!(json[unresolved]["zone"], "NoMap");
+    assert_eq!(json[unresolved]["world"], "Unknown");
+    assert_eq!(json[phantom]["zone"], "DoodleDougPhantomZoneP");
+    assert_eq!(json[phantom]["world"], "Unknown");
     assert_eq!(json[triton]["zone"], "Triton Avenue");
     assert_eq!(json[house]["zone"], "Avalon Castle Plot");
-    assert_eq!(json[house]["world"], "Housing_AV_BAC");
+    assert_eq!(json[house]["world"], "Avalon");
     assert_eq!(json[dusk]["zone"], "Meadows at Dusk");
     assert_eq!(json[alias]["world"], "Dragonspyre");
     assert_eq!(json[special]["world"], "Castle Darkmoor");
     assert_eq!(json[triton]["world"], "Wizard City");
     assert_eq!(json[zigazag]["world"], "Zigazag");
     assert_eq!(json[grizzleheim_lite]["world"], "Grizzleheim");
-    assert_eq!(json[event_root]["world"], "MonthlyEvents");
+    assert_eq!(json[event_root]["world"], "Unknown");
     let diagnostics_path = output.with_file_name("zones.diagnostics.json");
     let diagnostics: serde_json::Value =
         serde_json::from_slice(&fs::read(&diagnostics_path).unwrap()).unwrap();
@@ -190,6 +194,37 @@ fn resolves_candidates_writes_unknowns_and_records_header_provenance() {
         triton_diagnostic["selected"]["confidence"],
         "unverified_fallback"
     );
+    let unresolved_diagnostic = diagnostics
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["path"] == unresolved)
+        .unwrap();
+    assert_eq!(unresolved_diagnostic["emitted_zone"]["name"], "NoMap");
+    assert_eq!(
+        unresolved_diagnostic["emitted_zone"]["source"],
+        "canonical_leaf_fallback"
+    );
+    assert_eq!(
+        unresolved_diagnostic["emitted_zone"]["confidence"],
+        "unverified_fallback"
+    );
+    assert_eq!(unresolved_diagnostic["world"]["source"], "unknown");
+    let phantom_diagnostic = diagnostics
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["path"] == phantom)
+        .unwrap();
+    assert_eq!(
+        phantom_diagnostic["emitted_zone"]["name"],
+        "DoodleDougPhantomZoneP"
+    );
+    assert_eq!(
+        phantom_diagnostic["emitted_zone"]["source"],
+        "canonical_leaf_fallback"
+    );
+    assert_eq!(phantom_diagnostic["world"]["name"], "Unknown");
     let house_diagnostic = diagnostics
         .as_array()
         .unwrap()
@@ -198,8 +233,11 @@ fn resolves_candidates_writes_unknowns_and_records_header_provenance() {
         .unwrap();
     assert_eq!(house_diagnostic["selected"]["source"], "ZoneHeader");
     assert_eq!(house_diagnostic["selected"]["confidence"], "verified");
-    assert_eq!(house_diagnostic["world"]["name"], "Housing_AV_BAC");
-    assert_eq!(house_diagnostic["world"]["source"], "raw_root_fallback");
+    assert_eq!(house_diagnostic["world"]["name"], "Avalon");
+    assert_eq!(
+        house_diagnostic["world"]["source"],
+        "canonical_alias_fallback"
+    );
     assert_eq!(house_diagnostic["world"]["confidence"], "fallback");
     let zigazag_diagnostic = diagnostics
         .as_array()
@@ -217,7 +255,7 @@ fn resolves_candidates_writes_unknowns_and_records_header_provenance() {
         .iter()
         .find(|entry| entry["path"] == event_root)
         .unwrap();
-    assert_eq!(event_diagnostic["world"]["source"], "raw_root_fallback");
+    assert_eq!(event_diagnostic["world"]["source"], "unknown");
     let wizard_city_diagnostic = diagnostics
         .as_array()
         .unwrap()
@@ -310,13 +348,21 @@ fn generate_needs_no_oracle_and_never_writes_under_raw() {
 
     let json: serde_json::Value = serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
     assert_eq!(json.as_object().unwrap().len(), 1);
-    assert_eq!(json["Fixture/UnknownZone"]["zone"], "Unknown");
-    assert_eq!(json["Fixture/UnknownZone"]["world"], "Fixture");
+    assert_eq!(json["Fixture/UnknownZone"]["zone"], "UnknownZone");
+    assert_eq!(json["Fixture/UnknownZone"]["world"], "Unknown");
     let diagnostics_path = output.with_file_name("zones.diagnostics.json");
     let diagnostics: serde_json::Value =
         serde_json::from_slice(&fs::read(diagnostics_path).unwrap()).unwrap();
     assert_eq!(diagnostics.as_array().unwrap().len(), 1);
     assert_eq!(diagnostics[0]["confidence"], "unknown");
+    assert_eq!(
+        diagnostics[0]["emitted_zone"]["source"],
+        "canonical_leaf_fallback"
+    );
+    assert_eq!(
+        diagnostics[0]["emitted_zone"]["confidence"],
+        "unverified_fallback"
+    );
     assert_eq!(snapshot(&raw), before);
     let _ = fs::remove_dir_all(temp);
 }

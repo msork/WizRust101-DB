@@ -55,6 +55,7 @@ pub enum WorldSource {
     Localized,
     CanonicalAlias,
     RawRoot,
+    Unknown,
 }
 
 impl WorldSource {
@@ -63,6 +64,7 @@ impl WorldSource {
             Self::Localized => "localized",
             Self::CanonicalAlias => "canonical_alias_fallback",
             Self::RawRoot => "raw_root_fallback",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -313,10 +315,24 @@ fn resolve_world(
             evidence.to_owned(),
         );
     }
+    if matches!(root, "PetDerby" | "Raids") {
+        return (
+            root.to_owned(),
+            WorldSource::RawRoot,
+            format!("recognized player-facing content root {root:?}; preserved unchanged"),
+        );
+    }
+    if root.is_empty() {
+        return (
+            "Unknown".to_owned(),
+            WorldSource::Unknown,
+            "canonical path has no root component".to_owned(),
+        );
+    }
     (
-        root.to_owned(),
-        WorldSource::RawRoot,
-        format!("no localized name or known alias for canonical root {root:?}; preserved root unchanged"),
+        "Unknown".to_owned(),
+        WorldSource::Unknown,
+        format!("no defensible player-facing world mapping for canonical root {root:?}"),
     )
 }
 
@@ -330,6 +346,17 @@ fn canonical_world_alias(root: &str) -> Option<(&'static str, &'static str)> {
             "Grizzleheim",
             "GrizzleheimLite WorldTPTrans.xml contains the Grizzleheim World Transition label and references the GrizzleheimLite package",
         )),
+        "Housing_AR_Dormroom" => Some(("Arcanum", "en-US Zone.lang localizes this canonical zone as 'Arcanum Apartment'")),
+        "Housing_AV_BAC" => Some(("Avalon", "en-US Zone.lang localizes this canonical zone as 'Avalon Castle Plot'")),
+        "Housing_AvalonTier1" => Some(("Avalon", "canonical root contains the exact WorldNames.lang key Avalon")),
+        "Housing_AztecaTier1" => Some(("Azteca", "canonical root contains the exact WorldNames.lang key Azteca")),
+        "Housing_Darkmoor" => Some(("Darkmoor", "canonical root contains the exact WorldNames.lang key Darkmoor")),
+        "Housing_KT_Apartment" => Some(("Krokotopia", "en-US Zone.lang localizes this canonical zone as 'Krokotopia Apartment'")),
+        "Housing_Mirage_Tents" => Some(("Mirage", "canonical root contains the exact WorldNames.lang key Mirage")),
+        "Housing_Novus" => Some(("Novus", "canonical root contains the exact WorldNames.lang key Novus")),
+        "Housing_Polaris_Ship" => Some(("Polaris", "canonical root contains the exact WorldNames.lang key Polaris")),
+        "Housing_Villa_Gardens" => Some(("Wysteria", "en-US Zone.lang localizes this canonical zone as 'Wysteria Villa'")),
+        "Housing_Wallaru_Ranch" => Some(("Wallaru", "canonical root contains the exact WorldNames.lang key Wallaru")),
         _ => None,
     }
 }
@@ -911,7 +938,7 @@ pub fn write_json(zones: &[Zone], output: &Path) -> Result<(), Box<dyn std::erro
                 zone.path.as_str(),
                 serde_json::json!({
                     "world": zone.world_name,
-                    "zone": zone.selected.as_ref().map_or("Unknown", |candidate| candidate.name.as_str()),
+                    "zone": zone.selected.as_ref().map_or_else(|| canonical_leaf(&zone.path), |candidate| candidate.name.as_str()),
                 }),
             )
         })
@@ -950,13 +977,17 @@ pub fn write_diagnostics(zones: &[Zone], output: &Path) -> Result<(), Box<dyn st
                     "provenance": zone.selection_provenance,
                 })
             });
+            let emitted_zone = zone
+                .selected
+                .as_ref()
+                .map_or_else(|| canonical_leaf(&zone.path), |candidate| candidate.name.as_str());
             serde_json::json!({
                 "path": zone.path,
                 "world": {
                     "lookup_key": zone.world_lookup_key,
                     "name": zone.world_name,
                     "source": zone.world_source.label(),
-                    "confidence": if zone.world_source == WorldSource::Localized { "verified" } else { "fallback" },
+                    "confidence": if zone.world_source == WorldSource::Localized { "verified" } else if zone.world_source == WorldSource::Unknown { "unknown" } else { "fallback" },
                     "provenance": zone.world_provenance,
                 },
                 "header_field_value": zone.header_field_value,
@@ -964,6 +995,12 @@ pub fn write_diagnostics(zones: &[Zone], output: &Path) -> Result<(), Box<dyn st
                 "header_wizard_zone": zone.header_wizard_zone,
                 "candidates": candidates,
                 "selected": selected,
+                "emitted_zone": {
+                    "name": emitted_zone,
+                    "source": if zone.selected.is_some() { "resolver" } else { "canonical_leaf_fallback" },
+                    "confidence": if zone.selected.is_some() { zone.confidence.label() } else { "unverified_fallback" },
+                    "provenance": if zone.selected.is_some() { zone.selection_provenance.as_str() } else { "final canonical path component, preserved unchanged; unverified" },
+                },
                 "selection_provenance": zone.selection_provenance,
                 "confidence": zone.confidence.label(),
                 "ambiguity": zone.ambiguity,
@@ -977,6 +1014,10 @@ pub fn write_diagnostics(zones: &[Zone], output: &Path) -> Result<(), Box<dyn st
     let sidecar = diagnostics_path(output);
     fs::write(sidecar, bytes)?;
     Ok(())
+}
+
+fn canonical_leaf(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 pub fn diagnostics_path(output: &Path) -> PathBuf {
@@ -1003,7 +1044,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn world_resolution_prefers_localization_then_explicit_alias_then_raw_root() {
+    fn world_resolution_localizes_maps_known_roots_and_rejects_technical_roots() {
         let world_names = BTreeMap::from([
             ("WizardCity".to_owned(), "Wizard City".to_owned()),
             ("G14_HS".to_owned(), "Localized Zigazag".to_owned()),
@@ -1020,12 +1061,27 @@ mod tests {
         assert!(provenance.contains("Grizzleheim World Transition"));
 
         let (name, source, _) = resolve_world("MonthlyEvents", &world_names);
-        assert_eq!(name, "MonthlyEvents");
-        assert_eq!(source, WorldSource::RawRoot);
+        assert_eq!(name, "Unknown");
+        assert_eq!(source, WorldSource::Unknown);
 
         let (name, source, _) = resolve_world("Crafting", &world_names);
-        assert_eq!(name, "Crafting");
+        assert_eq!(name, "Unknown");
+        assert_eq!(source, WorldSource::Unknown);
+
+        let (name, source, provenance) = resolve_world("Housing_AV_BAC", &world_names);
+        assert_eq!(name, "Avalon");
+        assert_eq!(source, WorldSource::CanonicalAlias);
+        assert!(provenance.contains("Avalon Castle Plot"));
+
+        let (name, source, _) = resolve_world("PetDerby", &world_names);
+        assert_eq!(name, "PetDerby");
         assert_eq!(source, WorldSource::RawRoot);
+
+        for root in ["Test", "DD_DS_01", "DD_PA_01", "ThePhantomZoneWorld"] {
+            let (name, source, _) = resolve_world(root, &world_names);
+            assert_eq!(name, "Unknown");
+            assert_eq!(source, WorldSource::Unknown);
+        }
     }
 
     fn header(path: &str, value: &str) -> Vec<u8> {

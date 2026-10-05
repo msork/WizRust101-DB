@@ -118,8 +118,11 @@ fn report_generation(zones: &[Zone], output: &std::path::Path) {
         .iter()
         .filter(|zone| zone.confidence == zones::Confidence::Unknown)
         .count();
-    let distinct_worlds: BTreeSet<&str> =
-        zones.iter().map(|zone| zone.world_name.as_str()).collect();
+    let distinct_worlds: BTreeSet<&str> = zones
+        .iter()
+        .map(|zone| zone.world_name.as_str())
+        .filter(|world| *world != "Unknown")
+        .collect();
     let localized_worlds = zones
         .iter()
         .filter(|zone| zone.world_source == WorldSource::Localized)
@@ -132,8 +135,13 @@ fn report_generation(zones: &[Zone], output: &std::path::Path) {
         .iter()
         .filter(|zone| zone.world_source == WorldSource::RawRoot)
         .count();
+    let unknown_worlds = zones
+        .iter()
+        .filter(|zone| zone.world_source == WorldSource::Unknown)
+        .count();
+    let leaf_fallbacks = zones.iter().filter(|zone| zone.selected.is_none()).count();
     eprintln!(
-        "wrote {} zones to {} (zone verified={verified}, unverified_fallback={fallback}, Unknown={unknown}; world localized={localized_worlds}, canonical_alias_fallback={alias_worlds}, raw_root_fallback={raw_root_worlds}, distinct={}); diagnostics={}",
+        "wrote {} zones to {} (zone verified={verified}, unverified_fallback={fallback}, canonical_leaf_fallback={leaf_fallbacks}, unresolved={unknown}; world localized={localized_worlds}, canonical_alias_fallback={alias_worlds}, raw_root_fallback={raw_root_worlds}, Unknown={unknown_worlds}, distinct_non_unknown={}); diagnostics={}",
         zones.len(), output.display(), distinct_worlds.len(), zones::diagnostics_path(output).display()
     );
     eprintln!(
@@ -197,7 +205,12 @@ fn trace(zone: &Zone) -> String {
         .selected
         .as_ref()
         .map(format_selected)
-        .unwrap_or_else(|| "Unknown".into());
+        .unwrap_or_else(|| {
+            format!(
+                "canonical_leaf_fallback={:?}",
+                zone.path.rsplit('/').next().unwrap_or(&zone.path)
+            )
+        });
     let mut details = vec![
         format!("candidates=[{candidates}]"),
         format!("selected={selected}"),
@@ -257,7 +270,11 @@ fn compare(
             .and_then(|entry| entry.get("zone"))
             .and_then(serde_json::Value::as_str)
         {
-            Some("Unknown") => {
+            Some(_)
+                if by_path
+                    .get(key.as_str())
+                    .is_some_and(|zone| zone.unresolved) =>
+            {
                 missing += 1;
                 if let Some(zone) = by_path.get(key.as_str()) {
                     eprintln!("unresolved reference zone: {}", trace(zone));
@@ -285,9 +302,11 @@ fn compare(
             }
         }
     }
-    for (key, value) in &generated {
+    for key in generated.keys() {
         if !expected.contains_key(key)
-            && value.get("zone").and_then(serde_json::Value::as_str) != Some("Unknown")
+            && by_path
+                .get(key.as_str())
+                .is_some_and(|zone| !zone.unresolved)
         {
             new += 1;
             if let Some(zone) = by_path.get(key.as_str()) {
