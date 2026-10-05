@@ -2,11 +2,16 @@
 
 WizRust101-DB is fully vibe coded.
 
-A Rust CLI that builds `out/zones.json` from extracted Wizard101 data in `raw/`. Read [the specification](docs/specification.md) for discovery, naming confidence, schema, errors, and known uncertainties.
+A Rust command-line tool that discovers zones in extracted Wizard101 data and generates a zone-name database for [WizRust101-RPC](https://github.com/msork/WizRust101-RPC). The project documents its discovery and naming rules in the [specification](docs/specification.md).
 
-## Clean checkout
+## Requirements
 
-From a clean checkout, build and run the fixture tests with the locked Rust dependencies:
+- Rust and Cargo
+- An extracted Wizard101 data tree in `raw/` to generate the full database
+
+Extracted game files and the reference dataset are not included in a clean checkout. The fixture tests can run without either.
+
+## Build and test
 
 ```sh
 git clone https://github.com/msork/WizRust101-DB.git
@@ -15,23 +20,39 @@ cargo build --locked
 cargo test --locked
 ```
 
-The extracted game files are not committed. Put the extracted tree in `raw/` before generating the full database.
+## Generate the database
 
-## Generate and consume
+Place the extracted data under `raw/`, then run:
 
 ```sh
 cargo run --locked -- generate --input raw --output out/zones.json
+```
+
+This writes two files:
+
+- `out/zones.json` — a deterministic, alphabetically ordered object keyed by canonical zone paths. Each value has a `world` and `zone` string, for example `"Aquila/AQ_Z00_Hub": { "world": "Aquila", "zone": "Garden of Hesperides" }`. The RPC-facing contract is documented in the [specification](docs/specification.md).
+- `out/zones.diagnostics.json` — zone candidates, world lookup key and evidence, selected source and confidence, raw header values, provenance, and conflicts for each discovered zone.
+
+Every discovered path is included. Zone names supported by verified raw-data relationships are selected where available; a documented `unverified_fallback` may refer to a broader area or phase. World names require an exact canonical path-root key in `WorldNames.lang`; missing world or zone evidence is written explicitly as `"Unknown"`. Neither resolver guesses from path formatting, and world resolution does not affect zone-name selection. See the specification for evidence and confidence rules. The generator does not modify `raw/` and does not use the reference dataset to select names.
+
+## Compare with a reference
+
+If you have a reference JSON file, compare it with generated results using:
+
+```sh
 cargo run --locked -- compare --input raw --reference tmp/zones.json
 ```
 
-Generation is deterministic and emits every discovered canonical path, including paths whose value is `Unknown`. `out/zones.json` is a stable path -> string JSON object that WizRust101-RPC can consume directly as its zone-name database. Verified names use proven raw relationships, including a complete Compass POI-to-child chain, direct localized zone/housing header fields, or an uncontested shared-map association. An `unverified_fallback` uses the localized WizardZone value from the exact zone-header field; it may name a broader area or phase. `Unknown` means no usable localized name was found.
+`compare` generates the output and reports matches, mismatches, missing paths, and newly discovered paths. The reference is used only for validation.
 
-The generator also writes `out/zones.diagnostics.json`, which records candidates, selected source and confidence, raw header values, provenance, and conflicts. This sidecar does not change the RPC JSON schema or its selected names. The `generate` command does not read `tmp/zones.json`; only `compare` reads an oracle. `tmp/zones.json` is validation-only and never supplies names.
-
-Validation commands:
+## Development checks
 
 ```sh
 cargo fmt --check
 cargo clippy --locked -- -D warnings
 cargo test --locked
 ```
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).

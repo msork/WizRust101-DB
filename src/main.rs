@@ -118,9 +118,22 @@ fn report_generation(zones: &[Zone], output: &std::path::Path) {
         .iter()
         .filter(|zone| zone.confidence == zones::Confidence::Unknown)
         .count();
+    let resolved_worlds: BTreeSet<&str> = zones
+        .iter()
+        .filter_map(|zone| zone.world_name.as_deref())
+        .collect();
+    let resolved_world_count = zones
+        .iter()
+        .filter(|zone| zone.world_name.is_some())
+        .count();
     eprintln!(
-        "wrote {} zones to {} (verified={verified}, unverified_fallback={fallback}, Unknown={unknown}); diagnostics={}",
-        zones.len(), output.display(), zones::diagnostics_path(output).display()
+        "wrote {} zones to {} (zone verified={verified}, unverified_fallback={fallback}, Unknown={unknown}; world resolved={resolved_world_count}, unknown={}, distinct={}); diagnostics={}",
+        zones.len(), output.display(), zones.len() - resolved_world_count,
+        resolved_worlds.len(), zones::diagnostics_path(output).display()
+    );
+    eprintln!(
+        "world names: {}",
+        resolved_worlds.into_iter().collect::<Vec<_>>().join(", ")
     );
     report_source_summary(zones);
     for zone in zones {
@@ -218,18 +231,28 @@ fn compare(
         .as_object()
         .ok_or("reference must be a JSON object")?
         .iter()
-        .filter_map(|(key, value)| Some((key.clone(), value.as_str()?.to_owned())))
+        .filter_map(|(key, value)| {
+            let zone = value
+                .as_str()
+                .or_else(|| value.get("zone").and_then(serde_json::Value::as_str))?;
+            Some((key.clone(), zone.to_owned()))
+        })
         .filter(|(key, _)| key.contains('/'))
         .collect();
-    let generated: BTreeMap<String, String> = serde_json::from_slice(&fs::read(output)?)?;
+    let generated: BTreeMap<String, serde_json::Value> =
+        serde_json::from_slice(&fs::read(output)?)?;
     let by_path: BTreeMap<&str, &Zone> = zones
         .iter()
         .map(|zone| (zone.path.as_str(), zone))
         .collect();
     let (mut exact, mut mismatch, mut missing, mut new) = (0, 0, 0, 0);
     for (key, reference_name) in &expected {
-        match generated.get(key) {
-            Some(actual) if actual == "Unknown" => {
+        match generated
+            .get(key)
+            .and_then(|entry| entry.get("zone"))
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("Unknown") => {
                 missing += 1;
                 if let Some(zone) = by_path.get(key.as_str()) {
                     eprintln!("unresolved reference zone: {}", trace(zone));
@@ -258,7 +281,9 @@ fn compare(
         }
     }
     for (key, value) in &generated {
-        if !expected.contains_key(key) && value != "Unknown" {
+        if !expected.contains_key(key)
+            && value.get("zone").and_then(serde_json::Value::as_str) != Some("Unknown")
+        {
             new += 1;
             if let Some(zone) = by_path.get(key.as_str()) {
                 eprintln!("generated-only zone: {}", trace(zone));

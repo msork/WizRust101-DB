@@ -34,6 +34,8 @@ pub struct Candidate {
 #[derive(Debug, Clone)]
 pub struct Zone {
     pub path: String,
+    pub world_lookup_key: String,
+    pub world_name: Option<String>,
     pub candidates: Vec<Candidate>,
     pub selected: Option<Candidate>,
     pub confidence: Confidence,
@@ -107,6 +109,9 @@ pub fn discover(root: &Path) -> Result<Vec<Zone>, Box<dyn std::error::Error>> {
     let housing_lang = parse_lang(&fs::read(root.join("misc/Root/Locale/en-US/Housing.lang"))?)?;
     let wizard_zone_lang = parse_lang(&fs::read(
         root.join("misc/Root/Locale/en-US/WizardZone.lang"),
+    )?)?;
+    let world_names = parse_lang(&fs::read(
+        root.join("misc/Root/Locale/en-US/WorldNames.lang"),
     )?)?;
     let compass_lang = parse_lang(&fs::read(
         root.join("misc/Root/Locale/en-US/WizardCompassLocs.lang"),
@@ -243,8 +248,12 @@ pub fn discover(root: &Path) -> Result<Vec<Zone>, Box<dyn std::error::Error>> {
             .filter(|value| value.starts_with("WizardZone_"))
             .map(str::to_owned);
         let unresolved = confidence == Confidence::Unknown;
+        let world_lookup_key = path.split('/').next().unwrap_or_default().to_owned();
+        let world_name = world_names.get(&world_lookup_key).cloned();
         zones.push(Zone {
             path,
+            world_lookup_key,
+            world_name,
             candidates,
             selected,
             confidence,
@@ -830,14 +839,15 @@ pub fn write_json(zones: &[Zone], output: &Path) -> Result<(), Box<dyn std::erro
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     fs::create_dir_all(parent)?;
-    let data: BTreeMap<&str, &str> = zones
+    let data: BTreeMap<&str, serde_json::Value> = zones
         .iter()
         .map(|zone| {
             (
                 zone.path.as_str(),
-                zone.selected
-                    .as_ref()
-                    .map_or("Unknown", |candidate| candidate.name.as_str()),
+                serde_json::json!({
+                    "world": zone.world_name.as_deref().unwrap_or("Unknown"),
+                    "zone": zone.selected.as_ref().map_or("Unknown", |candidate| candidate.name.as_str()),
+                }),
             )
         })
         .collect();
@@ -877,6 +887,13 @@ pub fn write_diagnostics(zones: &[Zone], output: &Path) -> Result<(), Box<dyn st
             });
             serde_json::json!({
                 "path": zone.path,
+                "world": {
+                    "lookup_key": zone.world_lookup_key,
+                    "name": zone.world_name.as_deref().unwrap_or("Unknown"),
+                    "source": "WorldNames",
+                    "confidence": if zone.world_name.is_some() { "verified" } else { "unknown" },
+                    "provenance": world_provenance(zone.world_name.is_some()),
+                },
                 "header_field_value": zone.header_field_value,
                 "header_localized_value": zone.header_localized_value,
                 "header_wizard_zone": zone.header_wizard_zone,
@@ -895,6 +912,14 @@ pub fn write_diagnostics(zones: &[Zone], output: &Path) -> Result<(), Box<dyn st
     let sidecar = diagnostics_path(output);
     fs::write(sidecar, bytes)?;
     Ok(())
+}
+
+fn world_provenance(resolved: bool) -> &'static str {
+    if resolved {
+        "exact canonical path first component resolved through WorldNames.lang"
+    } else {
+        "exact canonical path first component has no WorldNames.lang localization; world left Unknown"
+    }
 }
 
 pub fn diagnostics_path(output: &Path) -> PathBuf {
