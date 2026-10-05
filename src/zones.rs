@@ -35,7 +35,9 @@ pub struct Candidate {
 pub struct Zone {
     pub path: String,
     pub world_lookup_key: String,
-    pub world_name: Option<String>,
+    pub world_name: String,
+    pub world_source: WorldSource,
+    pub world_provenance: String,
     pub candidates: Vec<Candidate>,
     pub selected: Option<Candidate>,
     pub confidence: Confidence,
@@ -46,6 +48,23 @@ pub struct Zone {
     pub ambiguity: Option<String>,
     pub conflicts: Vec<String>,
     pub unresolved: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorldSource {
+    Localized,
+    CanonicalAlias,
+    RawRoot,
+}
+
+impl WorldSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Localized => "localized",
+            Self::CanonicalAlias => "canonical_alias_fallback",
+            Self::RawRoot => "raw_root_fallback",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -249,11 +268,14 @@ pub fn discover(root: &Path) -> Result<Vec<Zone>, Box<dyn std::error::Error>> {
             .map(str::to_owned);
         let unresolved = confidence == Confidence::Unknown;
         let world_lookup_key = path.split('/').next().unwrap_or_default().to_owned();
-        let world_name = world_names.get(&world_lookup_key).cloned();
+        let (world_name, world_source, world_provenance) =
+            resolve_world(&world_lookup_key, &world_names);
         zones.push(Zone {
             path,
             world_lookup_key,
             world_name,
+            world_source,
+            world_provenance,
             candidates,
             selected,
             confidence,
@@ -267,6 +289,49 @@ pub fn discover(root: &Path) -> Result<Vec<Zone>, Box<dyn std::error::Error>> {
         });
     }
     Ok(zones)
+}
+
+fn resolve_world(
+    root: &str,
+    world_names: &BTreeMap<String, String>,
+) -> (String, WorldSource, String) {
+    if let Some(name) = world_names
+        .get(root)
+        .filter(|name| !name.trim().is_empty())
+        .filter(|_| !matches!(root, "AllWorlds" | "Crafting"))
+    {
+        return (
+            name.clone(),
+            WorldSource::Localized,
+            format!("exact canonical root {root:?} -> WorldNames.lang -> {name:?}"),
+        );
+    }
+    if let Some((name, evidence)) = canonical_world_alias(root) {
+        return (
+            name.to_owned(),
+            WorldSource::CanonicalAlias,
+            evidence.to_owned(),
+        );
+    }
+    (
+        root.to_owned(),
+        WorldSource::RawRoot,
+        format!("no localized name or known alias for canonical root {root:?}; preserved root unchanged"),
+    )
+}
+
+fn canonical_world_alias(root: &str) -> Option<(&'static str, &'static str)> {
+    match root {
+        "G14_HS" => Some((
+            "Zigazag",
+            "G14_HS WorldTPTrans.xml names the ZigZag transition; WorldHubZones links its canonical zone to en-US WizardZone_00001125=Upper Zigazag",
+        )),
+        "GrizzleheimLite" => Some((
+            "Grizzleheim",
+            "GrizzleheimLite WorldTPTrans.xml contains the Grizzleheim World Transition label and references the GrizzleheimLite package",
+        )),
+        _ => None,
+    }
 }
 
 fn select_candidate(
@@ -845,7 +910,7 @@ pub fn write_json(zones: &[Zone], output: &Path) -> Result<(), Box<dyn std::erro
             (
                 zone.path.as_str(),
                 serde_json::json!({
-                    "world": zone.world_name.as_deref().unwrap_or("Unknown"),
+                    "world": zone.world_name,
                     "zone": zone.selected.as_ref().map_or("Unknown", |candidate| candidate.name.as_str()),
                 }),
             )
@@ -889,10 +954,10 @@ pub fn write_diagnostics(zones: &[Zone], output: &Path) -> Result<(), Box<dyn st
                 "path": zone.path,
                 "world": {
                     "lookup_key": zone.world_lookup_key,
-                    "name": zone.world_name.as_deref().unwrap_or("Unknown"),
-                    "source": "WorldNames",
-                    "confidence": if zone.world_name.is_some() { "verified" } else { "unknown" },
-                    "provenance": world_provenance(zone.world_name.is_some()),
+                    "name": zone.world_name,
+                    "source": zone.world_source.label(),
+                    "confidence": if zone.world_source == WorldSource::Localized { "verified" } else { "fallback" },
+                    "provenance": zone.world_provenance,
                 },
                 "header_field_value": zone.header_field_value,
                 "header_localized_value": zone.header_localized_value,
@@ -912,14 +977,6 @@ pub fn write_diagnostics(zones: &[Zone], output: &Path) -> Result<(), Box<dyn st
     let sidecar = diagnostics_path(output);
     fs::write(sidecar, bytes)?;
     Ok(())
-}
-
-fn world_provenance(resolved: bool) -> &'static str {
-    if resolved {
-        "exact canonical path first component resolved through WorldNames.lang"
-    } else {
-        "exact canonical path first component has no WorldNames.lang localization; world left Unknown"
-    }
 }
 
 pub fn diagnostics_path(output: &Path) -> PathBuf {
@@ -944,6 +1001,32 @@ fn candidate_provenance(source: Source) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn world_resolution_prefers_localization_then_explicit_alias_then_raw_root() {
+        let world_names = BTreeMap::from([
+            ("WizardCity".to_owned(), "Wizard City".to_owned()),
+            ("G14_HS".to_owned(), "Localized Zigazag".to_owned()),
+            ("Crafting".to_owned(), "Crafting".to_owned()),
+        ]);
+
+        let (name, source, _) = resolve_world("G14_HS", &world_names);
+        assert_eq!(name, "Localized Zigazag");
+        assert_eq!(source, WorldSource::Localized);
+
+        let (name, source, provenance) = resolve_world("GrizzleheimLite", &world_names);
+        assert_eq!(name, "Grizzleheim");
+        assert_eq!(source, WorldSource::CanonicalAlias);
+        assert!(provenance.contains("Grizzleheim World Transition"));
+
+        let (name, source, _) = resolve_world("MonthlyEvents", &world_names);
+        assert_eq!(name, "MonthlyEvents");
+        assert_eq!(source, WorldSource::RawRoot);
+
+        let (name, source, _) = resolve_world("Crafting", &world_names);
+        assert_eq!(name, "Crafting");
+        assert_eq!(source, WorldSource::RawRoot);
+    }
 
     fn header(path: &str, value: &str) -> Vec<u8> {
         let mut bytes = b"\xf8\x63\x69\x81".to_vec();

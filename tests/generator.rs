@@ -55,6 +55,9 @@ fn resolves_candidates_writes_unknowns_and_records_header_provenance() {
     let unresolved = "NoWorld/NoMap";
     let alias = "DragonSpire/DS_Hub_Cathedral";
     let special = "G14_DM/DM_Z01_CastleDarkmoor";
+    let zigazag = "G14_HS/HS_Z01_ZigazagUpper";
+    let grizzleheim_lite = "GrizzleheimLite/GH_GrizzleheimHubLite";
+    let event_root = "MonthlyEvents/ME_Sinbad/ME_Sinbad_Int01";
     let house = "Housing_AV_BAC/Exterior";
     let dusk = "Housing_BuildACastleProto/Exterior_Dusk";
     make_zone(&raw, "parent", parent, Some("00001029"));
@@ -64,6 +67,9 @@ fn resolves_candidates_writes_unknowns_and_records_header_provenance() {
     make_zone(&raw, "unknown", unresolved, None);
     make_zone(&raw, "alias", alias, None);
     make_zone(&raw, "special", special, None);
+    make_zone(&raw, "zigazag", zigazag, None);
+    make_zone(&raw, "grizzleheim-lite", grizzleheim_lite, None);
+    make_zone(&raw, "event-root", event_root, None);
     make_zone_with_header(&raw, "house", house, Some("Zone_00001374".to_owned()));
     make_zone_with_header(&raw, "dusk", dusk, Some("Housing_00000832".to_owned()));
     fs::OpenOptions::new()
@@ -123,7 +129,7 @@ fn resolves_candidates_writes_unknowns_and_records_header_provenance() {
     .unwrap();
     fs::write(
         locale.join("WorldNames.lang"),
-        utf16("1:WorldNames\nAquila\n\nAquila\nDragonSpire\n\nDragonspyre\nG14_DM\n\nCastle Darkmoor\n"),
+        utf16("1:WorldNames\nAquila\n\nAquila\nDragonSpire\n\nDragonspyre\nG14_DM\n\nCastle Darkmoor\nWizardCity\n\nWizard City\n"),
     )
     .unwrap();
     let triton = "WizardCity/WC_Streets/WC_Triton";
@@ -147,7 +153,7 @@ fn resolves_candidates_writes_unknowns_and_records_header_provenance() {
     assert!(result.status.success());
     let json: serde_json::Value = serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
     let generated = json.as_object().unwrap();
-    assert_eq!(generated.len(), 10);
+    assert_eq!(generated.len(), 13);
     assert!(generated.values().all(|entry| {
         entry.is_object() && entry["world"].is_string() && entry["zone"].is_string()
     }));
@@ -156,13 +162,17 @@ fn resolves_candidates_writes_unknowns_and_records_header_provenance() {
     assert_eq!(json[hall]["zone"], "Stonegaze’s Antichamber");
     assert_eq!(json[conflicted]["zone"], "Infirmary");
     assert_eq!(json[unresolved]["zone"], "Unknown");
-    assert_eq!(json[unresolved]["world"], "Unknown");
+    assert_eq!(json[unresolved]["world"], "NoWorld");
     assert_eq!(json[triton]["zone"], "Triton Avenue");
     assert_eq!(json[house]["zone"], "Avalon Castle Plot");
-    assert_eq!(json[house]["world"], "Unknown");
+    assert_eq!(json[house]["world"], "Housing_AV_BAC");
     assert_eq!(json[dusk]["zone"], "Meadows at Dusk");
     assert_eq!(json[alias]["world"], "Dragonspyre");
     assert_eq!(json[special]["world"], "Castle Darkmoor");
+    assert_eq!(json[triton]["world"], "Wizard City");
+    assert_eq!(json[zigazag]["world"], "Zigazag");
+    assert_eq!(json[grizzleheim_lite]["world"], "Grizzleheim");
+    assert_eq!(json[event_root]["world"], "MonthlyEvents");
     let diagnostics_path = output.with_file_name("zones.diagnostics.json");
     let diagnostics: serde_json::Value =
         serde_json::from_slice(&fs::read(&diagnostics_path).unwrap()).unwrap();
@@ -188,8 +198,33 @@ fn resolves_candidates_writes_unknowns_and_records_header_provenance() {
         .unwrap();
     assert_eq!(house_diagnostic["selected"]["source"], "ZoneHeader");
     assert_eq!(house_diagnostic["selected"]["confidence"], "verified");
-    assert_eq!(house_diagnostic["world"]["name"], "Unknown");
-    assert_eq!(house_diagnostic["world"]["confidence"], "unknown");
+    assert_eq!(house_diagnostic["world"]["name"], "Housing_AV_BAC");
+    assert_eq!(house_diagnostic["world"]["source"], "raw_root_fallback");
+    assert_eq!(house_diagnostic["world"]["confidence"], "fallback");
+    let zigazag_diagnostic = diagnostics
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["path"] == zigazag)
+        .unwrap();
+    assert_eq!(
+        zigazag_diagnostic["world"]["source"],
+        "canonical_alias_fallback"
+    );
+    let event_diagnostic = diagnostics
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["path"] == event_root)
+        .unwrap();
+    assert_eq!(event_diagnostic["world"]["source"], "raw_root_fallback");
+    let wizard_city_diagnostic = diagnostics
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["path"] == triton)
+        .unwrap();
+    assert_eq!(wizard_city_diagnostic["world"]["source"], "localized");
     let dusk_diagnostic = diagnostics
         .as_array()
         .unwrap()
@@ -276,7 +311,7 @@ fn generate_needs_no_oracle_and_never_writes_under_raw() {
     let json: serde_json::Value = serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
     assert_eq!(json.as_object().unwrap().len(), 1);
     assert_eq!(json["Fixture/UnknownZone"]["zone"], "Unknown");
-    assert_eq!(json["Fixture/UnknownZone"]["world"], "Unknown");
+    assert_eq!(json["Fixture/UnknownZone"]["world"], "Fixture");
     let diagnostics_path = output.with_file_name("zones.diagnostics.json");
     let diagnostics: serde_json::Value =
         serde_json::from_slice(&fs::read(diagnostics_path).unwrap()).unwrap();

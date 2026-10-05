@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
     process,
 };
-use zones::{Candidate, Source, Zone};
+use zones::{Candidate, Source, WorldSource, Zone};
 
 fn main() {
     if let Err(error) = run() {
@@ -118,22 +118,27 @@ fn report_generation(zones: &[Zone], output: &std::path::Path) {
         .iter()
         .filter(|zone| zone.confidence == zones::Confidence::Unknown)
         .count();
-    let resolved_worlds: BTreeSet<&str> = zones
+    let distinct_worlds: BTreeSet<&str> =
+        zones.iter().map(|zone| zone.world_name.as_str()).collect();
+    let localized_worlds = zones
         .iter()
-        .filter_map(|zone| zone.world_name.as_deref())
-        .collect();
-    let resolved_world_count = zones
+        .filter(|zone| zone.world_source == WorldSource::Localized)
+        .count();
+    let alias_worlds = zones
         .iter()
-        .filter(|zone| zone.world_name.is_some())
+        .filter(|zone| zone.world_source == WorldSource::CanonicalAlias)
+        .count();
+    let raw_root_worlds = zones
+        .iter()
+        .filter(|zone| zone.world_source == WorldSource::RawRoot)
         .count();
     eprintln!(
-        "wrote {} zones to {} (zone verified={verified}, unverified_fallback={fallback}, Unknown={unknown}; world resolved={resolved_world_count}, unknown={}, distinct={}); diagnostics={}",
-        zones.len(), output.display(), zones.len() - resolved_world_count,
-        resolved_worlds.len(), zones::diagnostics_path(output).display()
+        "wrote {} zones to {} (zone verified={verified}, unverified_fallback={fallback}, Unknown={unknown}; world localized={localized_worlds}, canonical_alias_fallback={alias_worlds}, raw_root_fallback={raw_root_worlds}, distinct={}); diagnostics={}",
+        zones.len(), output.display(), distinct_worlds.len(), zones::diagnostics_path(output).display()
     );
     eprintln!(
         "world names: {}",
-        resolved_worlds.into_iter().collect::<Vec<_>>().join(", ")
+        distinct_worlds.into_iter().collect::<Vec<_>>().join(", ")
     );
     report_source_summary(zones);
     for zone in zones {
