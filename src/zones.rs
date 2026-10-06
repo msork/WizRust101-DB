@@ -55,6 +55,8 @@ pub enum WorldSource {
     Localized,
     CanonicalAlias,
     RawRoot,
+    RootFallback,
+    HouseFallback,
     Unknown,
 }
 
@@ -64,6 +66,8 @@ impl WorldSource {
             Self::Localized => "localized",
             Self::CanonicalAlias => "canonical_alias_fallback",
             Self::RawRoot => "raw_root_fallback",
+            Self::RootFallback => "root_fallback",
+            Self::HouseFallback => "house_fallback",
             Self::Unknown => "unknown",
         }
     }
@@ -329,10 +333,17 @@ fn resolve_world(
             "canonical path has no root component".to_owned(),
         );
     }
+    if root.starts_with("Housing") {
+        return (
+            "House".to_owned(),
+            WorldSource::HouseFallback,
+            format!("unresolved canonical root {root:?} starts with Housing; emitted House"),
+        );
+    }
     (
-        "Unknown".to_owned(),
-        WorldSource::Unknown,
-        format!("no defensible player-facing world mapping for canonical root {root:?}"),
+        root.to_owned(),
+        WorldSource::RootFallback,
+        format!("no localized name or known alias for canonical root {root:?}; preserved root unchanged"),
     )
 }
 
@@ -1044,7 +1055,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn world_resolution_localizes_maps_known_roots_and_rejects_technical_roots() {
+    fn world_resolution_localizes_aliases_and_applies_last_resort_fallbacks() {
         let world_names = BTreeMap::from([
             ("WizardCity".to_owned(), "Wizard City".to_owned()),
             ("G14_HS".to_owned(), "Localized Zigazag".to_owned()),
@@ -1061,12 +1072,12 @@ mod tests {
         assert!(provenance.contains("Grizzleheim World Transition"));
 
         let (name, source, _) = resolve_world("MonthlyEvents", &world_names);
-        assert_eq!(name, "Unknown");
-        assert_eq!(source, WorldSource::Unknown);
+        assert_eq!(name, "MonthlyEvents");
+        assert_eq!(source, WorldSource::RootFallback);
 
         let (name, source, _) = resolve_world("Crafting", &world_names);
-        assert_eq!(name, "Unknown");
-        assert_eq!(source, WorldSource::Unknown);
+        assert_eq!(name, "Crafting");
+        assert_eq!(source, WorldSource::RootFallback);
 
         let (name, source, provenance) = resolve_world("Housing_AV_BAC", &world_names);
         assert_eq!(name, "Avalon");
@@ -1077,10 +1088,16 @@ mod tests {
         assert_eq!(name, "PetDerby");
         assert_eq!(source, WorldSource::RawRoot);
 
+        for root in ["Housing", "Housing_WC", "Housing_AV_Gauntlet"] {
+            let (name, source, _) = resolve_world(root, &world_names);
+            assert_eq!(name, "House");
+            assert_eq!(source, WorldSource::HouseFallback);
+        }
+
         for root in ["Test", "DD_DS_01", "DD_PA_01", "ThePhantomZoneWorld"] {
             let (name, source, _) = resolve_world(root, &world_names);
-            assert_eq!(name, "Unknown");
-            assert_eq!(source, WorldSource::Unknown);
+            assert_eq!(name, root);
+            assert_eq!(source, WorldSource::RootFallback);
         }
     }
 

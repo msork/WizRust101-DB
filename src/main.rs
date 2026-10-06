@@ -135,13 +135,21 @@ fn report_generation(zones: &[Zone], output: &std::path::Path) {
         .iter()
         .filter(|zone| zone.world_source == WorldSource::RawRoot)
         .count();
+    let root_fallback_worlds = zones
+        .iter()
+        .filter(|zone| zone.world_source == WorldSource::RootFallback)
+        .count();
+    let house_fallback_worlds = zones
+        .iter()
+        .filter(|zone| zone.world_source == WorldSource::HouseFallback)
+        .count();
     let unknown_worlds = zones
         .iter()
         .filter(|zone| zone.world_source == WorldSource::Unknown)
         .count();
     let leaf_fallbacks = zones.iter().filter(|zone| zone.selected.is_none()).count();
     eprintln!(
-        "wrote {} zones to {} (zone verified={verified}, unverified_fallback={fallback}, canonical_leaf_fallback={leaf_fallbacks}, unresolved={unknown}; world localized={localized_worlds}, canonical_alias_fallback={alias_worlds}, raw_root_fallback={raw_root_worlds}, Unknown={unknown_worlds}, distinct_non_unknown={}); diagnostics={}",
+        "wrote {} zones to {} (zone verified={verified}, unverified_fallback={fallback}, canonical_leaf_fallback={leaf_fallbacks}, unresolved={unknown}; world localized={localized_worlds}, canonical_alias_fallback={alias_worlds}, raw_root_fallback={raw_root_worlds}, root_fallback={root_fallback_worlds}, house_fallback={house_fallback_worlds}, Unknown={unknown_worlds}, distinct_non_unknown={}); diagnostics={}",
         zones.len(), output.display(), distinct_worlds.len(), zones::diagnostics_path(output).display()
     );
     eprintln!(

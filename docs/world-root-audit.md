@@ -27,9 +27,9 @@ These mappings are exact-root rules with provenance in the resolver. Similar abb
 | `PetDerby` | 18 | The extracted `PetDerby.lang` and `Arena.lang` identify the player-facing Pet Derby activity. No world mapping is implied. |
 | `Raids` | 1 | The extracted raid resources establish a player-facing raid feature, but do not identify a world for its canonical root. No world mapping is implied. |
 
-## 3. Internal, test, technical, or unsupported roots (`Unknown`)
+## 3. Roots without a defensible world mapping
 
-All remaining 73 roots are emitted as `Unknown`. The extraction provides no defensible player-facing world mapping for them. Housing package/group names and abbreviations are not treated as worlds merely because a zone under them has a plausible title.
+At the time of this evidence audit, the following 73 roots had no defensible player-facing world mapping. The current output applies the requested final fallback to these roots: the 66 `Housing*` roots become `House`, while the other seven roots are preserved unchanged. This fallback behavior does not assert that these technical/group roots are canonical world names; it is applied because the zone database must carry a non-Unknown value for every non-empty root.
 
 | Root | Entries | Root | Entries |
 |---|---:|---|---:|
@@ -71,7 +71,7 @@ All remaining 73 roots are emitted as `Unknown`. The extraction provides no defe
 | `MonthlyEvents` | 29 | `Test` | 3 |
 | `ThePhantomZoneWorld` | 29 |  |  |
 
-`DD_DS_01` and `DD_PA_01` have activity transitions (“BattleBands” and “Tanglewood”) tied to technical packages; those labels do not establish world names. `Test` is a test root. `ThePhantomZoneWorld` contains minigame/technical content, not a localized world-title association. `Holiday`, `MonthlyEvents`, and the `Housing_*` entries are package/group labels whose contents span activities or properties, so they remain unknown unless one of the exact rules above applies.
+`DD_DS_01` and `DD_PA_01` have activity transitions (“BattleBands” and “Tanglewood”) tied to technical packages; those labels do not establish world names. `Test` is a test root. `ThePhantomZoneWorld` contains minigame/technical content, not a localized world-title association. `Holiday`, `MonthlyEvents`, and the `Housing_*` entries are package/group labels whose contents span activities or properties, so the current final fallback uses their root (or `House`) without claiming it is an evidence-backed world mapping.
 
 ## Sources and policy
 
@@ -81,4 +81,4 @@ All remaining 73 roots are emitted as `Unknown`. The extraction provides no defe
 - Extracted raid resources: evidence that raids are a player-facing feature, not evidence of a world.
 - World transition and hub/group metadata was inspected for the technical/event roots. A transition can name an activity and a hub grouping can aggregate unrelated zones; neither is generalized into a world mapping.
 
-The validation file `tmp/zones.json` is not a source of world names. The current 3,346-entry snapshot resolves 2,643 localized worlds, 51 canonical aliases, 19 preserved raw roots, and 633 unknown worlds. Counts can change with a different extraction.
+The validation file `tmp/zones.json` is not a source of world names. In the 3,346-entry snapshot, 2,643 entries use localization, 51 use canonical aliases, 19 retain recognized raw roots, 138 use `root_fallback`, 495 use `house_fallback`, and none remain `Unknown`. The fallback sources apply only to the entries that previously emitted `Unknown`; they do not change the localized or alias results. Counts can change with a different extraction.
